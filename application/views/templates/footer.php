@@ -35,6 +35,17 @@
 <script src="<?php echo base_url('assets'); ?>/plugins/toastr/toastr.js"></script>
 <script src="<?php echo base_url('assets'); ?>/plugins/datatables/datatables.min.js"></script>
 <script src="<?php echo base_url('assets'); ?>/js/script.js"></script>
+<?php if(
+	$this->uri->segment(1) == 'tb_page' ||
+	$this->uri->segment(1) == 'fs_page' ||
+	$this->uri->segment(1) == 'journals' ||
+	$this->uri->segment(1) == 'gl'
+): ?>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@14.5.0/dist/handsontable.full.min.css">
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/handsontable@14.5.0/dist/handsontable.full.min.js"></script>
+<script src="<?php echo base_url('assets'); ?>/js/spreadsheet-preview.js"></script>
+<?php endif; ?>
 <?php if($this->uri->segment(1) == 'dashboard' || $this->uri->segment(1) == 'jev'  || $this->uri->segment(1) == 'jevlist' || $this->uri->segment(1) == 'vbb_page'): ?>
 <script src="<?php echo base_url('assets'); ?>/js/scripts.js"></script>
 <!-- Mask JS -->

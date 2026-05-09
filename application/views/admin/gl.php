@@ -27,7 +27,7 @@
 						<div class="card-body pb-10">
 							<div class="row">
 								<div class="col-md-12">
-									<form method="post" action="<?=base_url('ledger');?>">
+									<form method="post" action="<?=base_url('ledger');?>" id="report_form">
                                     <input type="hidden" name="brgy" value="<?=$_SESSION['currbrgyid'];?>">
                                     <div class="row">
 												<div class="col-xl-2 col-md-2 col-lg-2 col-sm-12 col-12">
@@ -170,6 +170,11 @@
 
 
                                                 </div>
+                                                <div class="col-md-2 col-lg-2 col-sm-12">
+                                                    <button type="button" class="btn btn-outline-primary" id="preview_report_btn" data-preview-url="<?=base_url('ledger_preview');?>">
+                                                         Preview
+                                                    </button>
+                                                </div>
                                                 <div class="col-xl-2 col-md-2 col-lg-2 col-sm-12 col-12">
 													
 													<div class="form-group">
@@ -205,6 +210,18 @@
 						</div>
 					</div>
 					<!-- /Report Filter -->
+
+					<div class="card" id="preview_card" style="display:none;">
+						<div class="card-body">
+							<div class="row mb-3">
+								<div class="col-md-4 col-lg-4 col-sm-12">
+									<label for="preview_sheet_selector">Sheet</label>
+									<select class="form-control" id="preview_sheet_selector"></select>
+								</div>
+							</div>
+							<div id="preview_grid_container" style="height: 650px; width: 100%; overflow-x: auto; overflow-y: auto;"></div>
+						</div>
+					</div>
 
                     <!-- Report Filter -->
 					<div class="card" id="accounts_box">

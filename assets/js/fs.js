@@ -343,4 +343,15 @@ $('input[name="fs_type"]').change(function() {
   //end
 
 
+  if (typeof initSpreadsheetPreview === "function") {
+    initSpreadsheetPreview({
+      formSelector: "#report_form",
+      buttonSelector: "#preview_report_btn",
+      previewCardSelector: "#preview_card",
+      sheetSelector: "#preview_sheet_selector",
+      containerSelector: "#preview_grid_container",
+      previewUrl: $("#preview_report_btn").data("previewUrl")
+    });
+  }
+
 })
