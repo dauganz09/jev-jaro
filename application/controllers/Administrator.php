@@ -3013,12 +3013,177 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 
 	}
 
+	private function loadJournalReportsConfig(){
+		$this->config->load('journal_reports', true);
+		$cfg = $this->config->item('journal_reports', 'journal_reports');
+		return is_array($cfg) ? $cfg : array();
+	}
+
+	private function loadJournalColumnMapConfig(){
+		$this->config->load('journal_column_map', true);
+		$cfg = $this->config->item('journal_column_map', 'journal_column_map');
+		return is_array($cfg) ? $cfg : array();
+	}
+
+	/** First digit of account code as integer, or null if empty/invalid. */
+	private function jevAccountFirstDigit($accCode){
+		$accCode = trim((string) $accCode);
+		if($accCode === ''){
+			return null;
+		}
+		if(!ctype_digit($accCode[0])){
+			return null;
+		}
+		return (int) $accCode[0];
+	}
+
+	/** First non-empty string among values. */
+	private function journalCoalesceField(){
+		$args = func_get_args();
+		foreach($args as $a){
+			if($a === null){
+				continue;
+			}
+			$s = trim((string) $a);
+			if($s !== ''){
+				return $s;
+			}
+		}
+		return '';
+	}
+
+	private function journalApplyCrjLine($sheet, $row, &$newrow, $m, $map){
+		$code = isset($m['acc_code']) ? (string) $m['acc_code'] : '';
+		$crj = isset($map['crj']) && is_array($map['crj']) ? $map['crj'] : array();
+		$exact = isset($crj['exact']) && is_array($crj['exact']) ? $crj['exact'] : array();
+		if(isset($exact[$code])){
+			$rule = $map['crj']['exact'][$code];
+			$amt = ($rule['amount'] === 'debit') ? $m['debit'] : $m['credit'];
+			$sheet->setCellValue($rule['col'].$row, $amt);
+			return;
+		}
+		$dig = $this->jevAccountFirstDigit($code);
+		$min = isset($crj['liability_first_digit_min']) ? (int) $crj['liability_first_digit_min'] : 2;
+		if($dig !== null && $dig >= $min){
+			$lc = isset($crj['liability_cols']) && is_array($crj['liability_cols'])
+				? $crj['liability_cols']
+				: array('acc' => 'J', 'debit' => 'K', 'credit' => 'L');
+			$sheet->setCellValue($lc['acc'].($row + $newrow), $m['acc_code']);
+			$sheet->setCellValue($lc['debit'].($row + $newrow), $m['debit']);
+			$sheet->setCellValue($lc['credit'].($row + $newrow), $m['credit']);
+			$newrow++;
+			return;
+		}
+		$oc = isset($crj['other_cols']) && is_array($crj['other_cols'])
+			? $crj['other_cols']
+			: array('acc' => 'P', 'debit' => 'Q', 'credit' => 'R');
+		$sheet->setCellValue($oc['acc'].($row + $newrow), $m['acc_code']);
+		$sheet->setCellValue($oc['debit'].($row + $newrow), $m['debit']);
+		$sheet->setCellValue($oc['credit'].($row + $newrow), $m['credit']);
+		$newrow++;
+	}
+
+	private function journalApplyCkdjLine($sheet, $row, &$newrow, $m, $map){
+		$code = isset($m['acc_code']) ? (string) $m['acc_code'] : '';
+		$ckdj = isset($map['ckdj']) && is_array($map['ckdj']) ? $map['ckdj'] : array();
+		$exact = isset($ckdj['exact']) && is_array($ckdj['exact']) ? $ckdj['exact'] : array();
+		if(isset($exact[$code])){
+			$rule = $exact[$code];
+			$amt = ($rule['amount'] === 'debit') ? $m['debit'] : $m['credit'];
+			$sheet->setCellValue($rule['col'].$row, $amt);
+			if(in_array($code, array('10305020','10305040','10305010','50204020'), true)){
+				$newrow++;
+			}
+			return;
+		}
+		$nested = isset($ckdj['nested']) && is_array($ckdj['nested']) ? $ckdj['nested'] : array();
+		if(isset($nested[$code]) && is_array($nested[$code])){
+			foreach($nested[$code] as $rule){
+				if($rule['when'] === 'credit_zero' && (float) $m['credit'] == 0){
+					$c = $rule['cols'];
+					$sheet->setCellValue($c['acc'].($row + $newrow), $m['acc_code']);
+					$sheet->setCellValue($c['debit'].($row + $newrow), $m['debit']);
+					$sheet->setCellValue($c['credit'].($row + $newrow), $m['credit']);
+					$newrow++;
+					return;
+				}
+				if($rule['when'] === 'else'){
+					$sheet->setCellValue($rule['col'].$row, $m['credit']);
+					return;
+				}
+			}
+		}
+		$oc = isset($ckdj['other_cols']) && is_array($ckdj['other_cols'])
+			? $ckdj['other_cols']
+			: array('acc' => 'L', 'debit' => 'M', 'credit' => 'N');
+		$sheet->setCellValue($oc['acc'].($row + $newrow), $m['acc_code']);
+		$sheet->setCellValue($oc['debit'].($row + $newrow), $m['debit']);
+		$sheet->setCellValue($oc['credit'].($row + $newrow), $m['credit']);
+		$newrow++;
+	}
+
+	private function journalApplyCsdjLine($sheet, $row, &$newrow, $m, $map){
+		$code = isset($m['acc_code']) ? (string) $m['acc_code'] : '';
+		$csdj = isset($map['csdj']) && is_array($map['csdj']) ? $map['csdj'] : array();
+		$exact = isset($csdj['exact']) && is_array($csdj['exact']) ? $csdj['exact'] : array();
+		if(isset($exact[$code])){
+			$rule = $exact[$code];
+			$amt = ($rule['amount'] === 'debit') ? $m['debit'] : $m['credit'];
+			$sheet->setCellValue($rule['col'].$row, $amt);
+			return;
+		}
+		$nested = isset($csdj['nested']) && is_array($csdj['nested']) ? $csdj['nested'] : array();
+		if(isset($nested[$code]) && is_array($nested[$code])){
+			foreach($nested[$code] as $rule){
+				if($rule['when'] === 'credit_zero' && (float) $m['credit'] == 0){
+					$c = $rule['cols'];
+					$sheet->setCellValue($c['acc'].($row + $newrow), $m['acc_code']);
+					$sheet->setCellValue($c['debit'].($row + $newrow), $m['debit']);
+					$sheet->setCellValue($c['credit'].($row + $newrow), $m['credit']);
+					$newrow++;
+					return;
+				}
+				if($rule['when'] === 'debit_zero' && (float) $m['debit'] == 0){
+					$c = $rule['cols'];
+					$sheet->setCellValue($c['acc'].($row + $newrow), $m['acc_code']);
+					$sheet->setCellValue($c['debit'].($row + $newrow), $m['debit']);
+					$sheet->setCellValue($c['credit'].($row + $newrow), $m['credit']);
+					$newrow++;
+					return;
+				}
+				if($rule['when'] === 'else'){
+					$fld = isset($rule['amount']) ? $rule['amount'] : 'debit';
+					$amt = ($fld === 'credit') ? $m['credit'] : $m['debit'];
+					$sheet->setCellValue($rule['col'].$row, $amt);
+					$newrow++;
+					return;
+				}
+			}
+		}
+		$oc = isset($csdj['other_cols']) && is_array($csdj['other_cols'])
+			? $csdj['other_cols']
+			: array('acc' => 'L', 'debit' => 'M', 'credit' => 'N');
+		$sheet->setCellValue($oc['acc'].($row + $newrow), $m['acc_code']);
+		$sheet->setCellValue($oc['debit'].($row + $newrow), $m['debit']);
+		$sheet->setCellValue($oc['credit'].($row + $newrow), $m['credit']);
+		$newrow++;
+	}
+
 	public function generateGJ(){
 		$startDate = date('Y-m-d', strtotime($this->input->post('sdate')));
 		$endDate = date('Y-m-d', strtotime($this->input->post('edate')));
 		$jtype = $this->getType($this->input->post('j_type'));
-				
-		$this->db->select('j.jev_no, j.jev_date,j.type,j.particulars,j.payor_payee, jd.acc_code, jd.acc_title, jd.debit, jd.credit');
+
+		$includePending = ($this->input->post('include_pending') === '1');
+		if(!$includePending){
+			$this->db->where('j.status', 1);
+		}
+
+		$this->db->select('
+			j.jev_id, j.jev_no, j.jev_date, j.type, j.particulars, j.payor_payee, j.fund, j.status,
+			jd.jevdata_id, jd.acc_code, jd.acc_title, jd.debit, jd.credit,
+			jd.or_num, jd.or_date, jd.payor, jd.payee, jd.dv_no, jd.check_no, jd.check_date, jd.bank_acct
+		');
 		$this->db->from('tbl_jev j');
 		$this->db->join('tbl_jevdata jd', 'j.jev_no = jd.jev_no AND j.jev_id = jd.jev_id');
 		$this->db->where('j.brgy', $this->input->post('brgy'));
@@ -3057,15 +3222,41 @@ foreach ($result as $row) {
 
     // Check if the JEV number already exists in the date entry
     if (!isset($organizedJevData[$jevDate][$jevNo])) {
-        // If not, create a new JEV entry
+        // If not, create a new JEV entry — header refs filled from first line, then merged
         $organizedJevData[$jevDate][$jevNo] = array(
             'jev_no' => $jevNo,
 			'parts'=>$parts,
 			'payor_payee'=>$payor_payee,
 			'type'=>$type,
+			'fund' => isset($row->fund) ? $row->fund : '',
+			'status' => isset($row->status) ? $row->status : 0,
+			'or_num' => '',
+			'or_date' => '',
+			'payor_line' => '',
+			'payee_line' => '',
+			'dv_no' => '',
+			'check_no' => '',
+			'check_date' => '',
+			'bank_acct' => '',
             'jev_data' => array(),
         );
     }
+
+	$h =& $organizedJevData[$jevDate][$jevNo];
+	$h['or_num'] = $this->journalCoalesceField($h['or_num'], isset($row->or_num) ? $row->or_num : '');
+	$od = isset($row->or_date) ? $row->or_date : '';
+	if($od !== '' && $od !== '0000-00-00'){
+		$h['or_date'] = $this->journalCoalesceField($h['or_date'], $od);
+	}
+	$h['payor_line'] = $this->journalCoalesceField($h['payor_line'], isset($row->payor) ? $row->payor : '');
+	$h['payee_line'] = $this->journalCoalesceField($h['payee_line'], isset($row->payee) ? $row->payee : '');
+	$h['dv_no'] = $this->journalCoalesceField($h['dv_no'], isset($row->dv_no) ? $row->dv_no : '');
+	$h['check_no'] = $this->journalCoalesceField($h['check_no'], isset($row->check_no) ? $row->check_no : '');
+	$cd = isset($row->check_date) ? $row->check_date : '';
+	if($cd !== '' && $cd !== '0000-00-00'){
+		$h['check_date'] = $this->journalCoalesceField($h['check_date'], $cd);
+	}
+	$h['bank_acct'] = $this->journalCoalesceField($h['bank_acct'], isset($row->bank_acct) ? $row->bank_acct : '');
 
     // Add JEV data to the array
     $organizedJevData[$jevDate][$jevNo]['jev_data'][] = array(
@@ -3134,6 +3325,8 @@ foreach ($result as $row) {
 		$spreadsheet->getActiveSheet()->setCellValue('A6', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
 		// $spreadsheet->getActiveSheet()->setCellValue('A7', 'Fund: General Fund');
 
+		$colMap = $this->loadJournalColumnMapConfig();
+
 		$row = 11;
 		
 		foreach($result as $date => $jev_no){
@@ -3146,71 +3339,27 @@ foreach ($result as $row) {
 				$sheet->setCellValue('B' . $row,$date);
 				$sheet->setCellValue('C' . $row,$v['jev_no']);
 				$sheet->setCellValue('E' . $row,$v['payor_payee']);
+				$disbRef = '';
+				if(!empty($v['dv_no'])){
+					$disbRef .= 'DV: '.$v['dv_no'];
+				}
+				if(!empty($v['check_no'])){
+					$disbRef .= ($disbRef !== '' ? ' | ' : '').'Chk: '.$v['check_no'];
+				}
+				if(!empty($v['check_date']) && $v['check_date'] !== '0000-00-00'){
+					$disbRef .= ($disbRef !== '' ? ' ' : '').date('m/d/Y', strtotime($v['check_date']));
+				}
+				if(!empty($v['bank_acct'])){
+					$disbRef .= ($disbRef !== '' ? ' | ' : '').'Bank: '.$v['bank_acct'];
+				}
+				$sheet->setCellValue('D' . $row,$disbRef);
 				// $sheet->getStyle('C'.$row)->getAlignment()->setWrapText(true);
 								
 				
 				
 					$newrow=0;
 					foreach($v['jev_data'] as $l =>$m){
-						
-						//$sheet->setCellValue('D' . ($row+$merge),$m['acc_code']);
-						// $sheet->setCellValue('E' . ($row+$merge),$merge);
-						//$sheet->setCellValue('F' . ($row+$merge),$m['debit']);
-						//$sheet->setCellValue('G' . ($row+$merge),$m['credit']);
-						// $sheet->setCellValue('H' . ($row+$merge),$merge);
-						if($m['acc_code']==="10305020"){
-							$sheet->setCellValue('G' . $row,$m['credit']);
-							
-						
-						}elseif($m['acc_code']==="20201010"){
-							if($m['credit'] == 0){
-							$sheet->setCellValue('K' . ($row+$newrow),$m['acc_code']);
-							$sheet->setCellValue('L' . ($row+$newrow),$m['debit']);
-							$sheet->setCellValue('M' . ($row+$newrow),$m['credit']);
-							
-							$newrow++;
-							}else{
-							$sheet->setCellValue('H' . $row,$m['credit']);
-							$newrow++;
-							
-							}
-						}elseif($m['acc_code']==="50101010"){
-							if($m['debit'] == 0){
-								$sheet->setCellValue('K' . ($row+$newrow),$m['acc_code']);
-								$sheet->setCellValue('L' . ($row+$newrow),$m['debit']);
-								$sheet->setCellValue('M' . ($row+$newrow),$m['credit']);
-								
-								$newrow++;
-								}else{
-							
-							$sheet->setCellValue('I' . $row,$m['debit']);
-							$newrow++;
-								}
-
-						}elseif($m['acc_code']==="20201030"){
-							if($m['debit'] == 0){
-								$sheet->setCellValue('K' . ($row+$newrow),$m['acc_code']);
-								$sheet->setCellValue('L' . ($row+$newrow),$m['debit']);
-								$sheet->setCellValue('M' . ($row+$newrow),$m['credit']);
-								
-								$newrow++;
-								}else{
-							$sheet->setCellValue('J' . $row,$m['debit']);
-							$newrow++;
-								}
-						
-						}else{
-							$sheet->setCellValue('L' . ($row+$newrow),$m['acc_code']);
-							$sheet->setCellValue('M' . ($row+$newrow),$m['debit']);
-							$sheet->setCellValue('N' . ($row+$newrow),$m['credit']);
-							
-							$newrow++;
-							
-						}
-						
-					
-					
-							
+						$this->journalApplyCsdjLine($sheet, $row, $newrow, $m, $colMap);
 				}
 				$row +=$newrow;
 				
@@ -3277,6 +3426,8 @@ foreach ($result as $row) {
 		$spreadsheet->getActiveSheet()->setCellValue('A7', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
 		// $spreadsheet->getActiveSheet()->setCellValue('A7', 'Fund: General Fund');
 
+		$colMap = $this->loadJournalColumnMapConfig();
+
 		$row = 11;
 		
 		foreach($result as $date => $jev_no){
@@ -3289,59 +3440,27 @@ foreach ($result as $row) {
 				$sheet->setCellValue('B' . $row,$date);
 				$sheet->setCellValue('C' . $row,$v['jev_no']);
 				$sheet->setCellValue('E' . $row,$v['payor_payee']);
+				$chkRef = '';
+				if(!empty($v['dv_no'])){
+					$chkRef .= 'DV: '.$v['dv_no'];
+				}
+				if(!empty($v['check_no'])){
+					$chkRef .= ($chkRef !== '' ? ' | ' : '').'Chk: '.$v['check_no'];
+				}
+				if(!empty($v['check_date']) && $v['check_date'] !== '0000-00-00'){
+					$chkRef .= ($chkRef !== '' ? ' ' : '').date('m/d/Y', strtotime($v['check_date']));
+				}
+				if(!empty($v['bank_acct'])){
+					$chkRef .= ($chkRef !== '' ? ' | ' : '').'Bank: '.$v['bank_acct'];
+				}
+				$sheet->setCellValue('D' . $row,$chkRef);
 				// $sheet->getStyle('C'.$row)->getAlignment()->setWrapText(true);
 								
 				
 				
 					$newrow=0;
 					foreach($v['jev_data'] as $l =>$m){
-						
-						//$sheet->setCellValue('D' . ($row+$merge),$m['acc_code']);
-						// $sheet->setCellValue('E' . ($row+$merge),$merge);
-						//$sheet->setCellValue('F' . ($row+$merge),$m['debit']);
-						//$sheet->setCellValue('G' . ($row+$merge),$m['credit']);
-						// $sheet->setCellValue('H' . ($row+$merge),$merge);
-						if($m['acc_code']==="10102020"){
-							$sheet->setCellValue('F' . $row,$m['credit']);
-							
-						
-						}elseif($m['acc_code']==="20201010"){
-							if($m['credit'] == 0){
-							$sheet->setCellValue('L' . ($row+$newrow),$m['acc_code']);
-							$sheet->setCellValue('M' . ($row+$newrow),$m['debit']);
-							$sheet->setCellValue('N' . ($row+$newrow),$m['credit']);
-							
-							$newrow++;
-							}else{
-							$sheet->setCellValue('G' . $row,$m['credit']);
-							
-							}
-						}elseif($m['acc_code']==="10305020"){
-							
-							$sheet->setCellValue('H' . $row,$m['debit']);
-							$newrow++;
-
-						}elseif($m['acc_code']==="10305040"){
-							$sheet->setCellValue('I' . $row,$m['debit']);
-							$newrow++;
-						}elseif($m['acc_code']==="10305010"){
-							$sheet->setCellValue('J' . $row,$m['debit']);
-							$newrow++;
-						}elseif($m['acc_code']==="50204020"){
-							$sheet->setCellValue('K' . $row,$m['debit']);
-							$newrow++;
-						}else{
-							$sheet->setCellValue('L' . ($row+$newrow),$m['acc_code']);
-							$sheet->setCellValue('M' . ($row+$newrow),$m['debit']);
-							$sheet->setCellValue('N' . ($row+$newrow),$m['credit']);
-							
-							$newrow++;
-							
-						}
-						
-					
-					
-							
+						$this->journalApplyCkdjLine($sheet, $row, $newrow, $m, $colMap);
 				}
 				$row +=$newrow;
 				
@@ -3410,6 +3529,8 @@ foreach ($result as $row) {
 		$spreadsheet->getActiveSheet()->setCellValue('A6', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
 		// $spreadsheet->getActiveSheet()->setCellValue('A7', 'Fund: General Fund');
 
+		$colMap = $this->loadJournalColumnMapConfig();
+
 		$row = 12;
 		
 		foreach($result as $date => $jev_no){
@@ -3422,50 +3543,21 @@ foreach ($result as $row) {
 				$sheet->setCellValue('B' . $row,$date);
 				$sheet->setCellValue('C' . $row,$v['jev_no']);
 				$sheet->setCellValue('E' . $row,$v['payor_payee']);
+				$crjRef = '';
+				if(!empty($v['or_num'])){
+					$crjRef .= 'OR: '.$v['or_num'];
+				}
+				if(!empty($v['or_date']) && $v['or_date'] !== '0000-00-00'){
+					$crjRef .= ($crjRef !== '' ? ' ' : '').date('m/d/Y', strtotime($v['or_date']));
+				}
+				$sheet->setCellValue('D' . $row,$crjRef);
 				// $sheet->getStyle('C'.$row)->getAlignment()->setWrapText(true);
 								
 				
 				
 					$newrow=0;
 					foreach($v['jev_data'] as $l =>$m){
-						
-						//$sheet->setCellValue('D' . ($row+$merge),$m['acc_code']);
-						// $sheet->setCellValue('E' . ($row+$merge),$merge);
-						//$sheet->setCellValue('F' . ($row+$merge),$m['debit']);
-						//$sheet->setCellValue('G' . ($row+$merge),$m['credit']);
-						// $sheet->setCellValue('H' . ($row+$merge),$merge);
-						if($m['acc_code']==="20201010"){
-							$sheet->setCellValue('F' . $row,$m['credit']);
-
-						
-						}elseif($m['acc_code']==="20201070"){
-							$sheet->setCellValue('G' . $row,$m['credit']);
-						}elseif($m['acc_code']==="40102040"){
-							$sheet->setCellValue('H' . $row,$m['credit']);
-
-						}elseif($m['acc_code']==="40105020"){
-							$sheet->setCellValue('I' . $row,$m['credit']);
-						}elseif($m['acc_code']==="10102010"){
-							$sheet->setCellValue('M' . $row,$m['debit']);
-						}elseif($m['acc_code']==="10101010"){
-							$sheet->setCellValue('N' . $row,$m['debit']);
-						}elseif(substr($m['acc_code'], 0, 1) >= "2"){
-							$sheet->setCellValue('J' . ($row+$newrow),$m['acc_code']);
-							$sheet->setCellValue('K' . ($row+$newrow),$m['debit']);
-							$sheet->setCellValue('L' . ($row+$newrow),$m['credit']);
-							
-							$newrow++;
-							
-						}else{
-							$sheet->setCellValue('P' . ($row+$newrow),$m['acc_code']);
-							$sheet->setCellValue('Q' . ($row+$newrow),$m['debit']);
-							$sheet->setCellValue('R' . ($row+$newrow),$m['credit']);
-							$newrow++;
-						}
-						
-					
-					
-							
+						$this->journalApplyCrjLine($sheet, $row, $newrow, $m, $colMap);
 				}
 				$row +=$newrow;
 				//$row++;
@@ -3533,9 +3625,27 @@ foreach ($result as $row) {
 	
 			// Get the active sheet
 			$sheet = $spreadsheet->getActiveSheet();
+			$jr = $this->loadJournalReportsConfig();
 			$spreadsheet->getActiveSheet()->setCellValue('A4', 'Barangay ' . $_SESSION['currbrgy']);
 			$spreadsheet->getActiveSheet()->setCellValue('A6', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
-			$spreadsheet->getActiveSheet()->setCellValue('A7', 'Fund: General Fund');
+			$funds = array();
+			foreach($result as $d => $jevList){
+				foreach($jevList as $vv){
+					$fn = isset($vv['fund']) ? trim((string) $vv['fund']) : '';
+					if($fn !== ''){
+						$funds[$fn] = true;
+					}
+				}
+			}
+			if(count($funds) === 1){
+				$fk = array_keys($funds);
+				$fundLine = 'Fund: '.$fk[0];
+			}elseif(count($funds) > 1){
+				$fundLine = 'Fund: (multiple)';
+			}else{
+				$fundLine = 'Fund: '.(isset($jr['fund_label_default']) ? $jr['fund_label_default'] : 'General Fund');
+			}
+			$spreadsheet->getActiveSheet()->setCellValue('A7', $fundLine);
 
 			$row = 12;
 			$main_row=12;
@@ -3620,12 +3730,12 @@ foreach ($result as $row) {
 				$sheet->setCellValue('D'.($main_row+3),'Approved By:');
 
 				$sheet->mergeCells('F'.($main_row+5).':G'.($main_row+5));
-				$sheet->setCellValue('F'.($main_row+5),'Judy G. Parado, CPA');
+				$sheet->setCellValue('F'.($main_row+5), isset($jr['approved_by_name']) ? $jr['approved_by_name'] : '');
 				$sheet->getStyle('F'.($main_row+5))
 				->getFont()
 				->setUnderline(\PhpOffice\PhpSpreadsheet\Style\Font::UNDERLINE_SINGLE);
 				$sheet->mergeCells('F'.($main_row+6).':G'.($main_row+6));
-				$sheet->setCellValue('F'.($main_row+6),'Municipal Accountant');
+				$sheet->setCellValue('F'.($main_row+6), isset($jr['approved_by_title']) ? $jr['approved_by_title'] : '');
 
 				$sheet->getStyle('F'.($main_row+5).':G'.($main_row+6))->getAlignment()->setHorizontal('center');
 				$sheet->getStyle('F'.($main_row+5).':G'.($main_row+6))->getAlignment()->setVertical('center');
