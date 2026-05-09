@@ -43,6 +43,12 @@
                                                        
                                                     </select>
                                                 </div>
+                                        <div class="col-md-8 col-lg-8 col-sm-12 mt-2">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" name="include_pending" id="include_pending" value="1" checked>
+                                                <label class="form-check-label" for="include_pending">Include pending / unapproved JEVs</label>
+                                            </div>
+                                        </div>
                                         </div>
                                     </div>
                                     <hr class="mt-10">
