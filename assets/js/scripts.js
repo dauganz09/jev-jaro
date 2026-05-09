@@ -59,6 +59,30 @@ $(document).ready(function () {
 		columnDefs: [],
 	});
 
+	// subsidiary table (optional, requires migration)
+	const tbl_subsidiaries = $("#tbl_subsidiaries").length
+		? $("#tbl_subsidiaries").DataTable({
+				pagingType: "full_numbers",
+				lengthMenu: [
+					[-1, 30, 70],
+					["All", 30, 70],
+				],
+				scrollY: "300px",
+				scrollCollapse: true,
+				searchable: true,
+				responsive: true,
+				language: {
+					search: "_INPUT_",
+					info: "Showing _START_ to _END_ of _TOTAL_ Subsidiaries",
+					loadingRecords: "Loading subsidiaries.....",
+					searchPlaceholder: "Search subsidiaries....",
+					infoFiltered: "(filtered from _MAX_ total Subsidiaries)",
+					zeroRecords: "No subsidiaries found",
+				},
+				columnDefs: [],
+		  })
+		: null;
+
 	//end
 
 	//accounts table jev
@@ -246,6 +270,28 @@ $(document).ready(function () {
 		$("#account_modal").modal("hide");
 	});
 
+	// select subsidiary row
+	if (tbl_subsidiaries) {
+		$("#tbl_subsidiaries tbody").on("click", "tr", function () {
+			var rowData = tbl_subsidiaries.row(this).data();
+			if (!rowData) return;
+
+			var type = rowData[0];
+			var name = rowData[1];
+			var externalId = rowData[2];
+			var tin = rowData[3];
+
+			var triggeringInputs = $("#subsidiary_modal").data("triggeringInputs");
+			if (triggeringInputs) {
+				triggeringInputs.subId.val($(this).attr("data-sub-id") || "");
+				triggeringInputs.subType.val(type || "");
+				triggeringInputs.subName.val(name || "");
+			}
+
+			$("#subsidiary_modal").modal("hide");
+		});
+	}
+
 	//end
 
 	//keyboard
@@ -332,6 +378,13 @@ $(document).ready(function () {
 			"<td>" +
 			'<input type="text" class="form-control acct_c input-fields">' +
 			"</td>" +
+			"<td>" +
+			'<input type="hidden" class="sub_id" value="">' +
+			'<input type="hidden" class="sub_type" value="">' +
+			'<div class="input-group input-group-sm flex-nowrap">' +
+			'<input type="text" class="form-control sub_name" placeholder="(optional) Enter — search" readonly>' +
+			'<button type="button" class="btn btn-outline-secondary sub_clear_btn" title="Clear subsidiary" aria-label="Clear subsidiary">&times;</button>' +
+			"</div></td>" +
 			"<td>" +
 			'<input type="text" class="form-control debitInput"  placeholder="0.00">' +
 			"</td>" +
@@ -453,6 +506,99 @@ $(document).ready(function () {
 		}
 	});
 
+	// Subsidiary picker (press Enter on the subsidiary field)
+	$(document).on("keypress", ".sub_name", function (e) {
+		if (e.which === 13) {
+			let modal = $("#subsidiary_modal");
+			var subIdInput = $(this).closest("tr").find(".sub_id");
+			var subTypeInput = $(this).closest("tr").find(".sub_type");
+			var subNameInput = $(this).closest("tr").find(".sub_name");
+
+			modal.data("triggeringInputs", {
+				subId: subIdInput,
+				subType: subTypeInput,
+				subName: subNameInput,
+			});
+			modal.modal("show");
+			loadSubsidiaries();
+			if (tbl_subsidiaries) {
+				tbl_subsidiaries.search($(this).val()).draw();
+			}
+		}
+	});
+
+	$(document).on("click", ".sub_clear_btn", function (e) {
+		e.preventDefault();
+		e.stopPropagation();
+		var tr = $(this).closest("tr");
+		tr.find(".sub_id").val("");
+		tr.find(".sub_type").val("");
+		tr.find(".sub_name").val("");
+	});
+
+	function loadSubsidiaries() {
+		if (!tbl_subsidiaries) return;
+		let type = $("#sub_filter_type").val() || "";
+		let q = "";
+		$.get(`${BASE_URL}getsubsidiaries`, { q: q, type: type, limit: 200 }, function (res) {
+			tbl_subsidiaries.clear();
+			$.each(res || [], function (i, key) {
+				// Store id on row via createdRow hook-ish: easiest is to embed then set after draw
+				tbl_subsidiaries.row.add([key.subsidiary_type, key.name, key.external_id || "", key.tin || ""]);
+			});
+			tbl_subsidiaries.draw();
+
+			// attach ids to rendered rows
+			$("#tbl_subsidiaries tbody tr").each(function (idx) {
+				let data = tbl_subsidiaries.row(this).data();
+				// find matching object (same type+name+external_id+tin)
+				let obj = (res || []).find(
+					(r) =>
+						r.subsidiary_type === data[0] &&
+						r.name === data[1] &&
+						(r.external_id || "") === data[2] &&
+						(r.tin || "") === data[3]
+				);
+				if (obj) $(this).attr("data-sub-id", obj.subsidiary_id);
+			});
+		});
+	}
+
+	$(document).on("change", "#sub_filter_type", function () {
+		loadSubsidiaries();
+	});
+
+	$(document).on("click", "#add_subsidiary_btn", function () {
+		Swal.fire({
+			title: "Add Subsidiary",
+			html:
+				'<input id="sw_sub_type" class="swal2-input" placeholder="type (employee/supplier/etc)">' +
+				'<input id="sw_sub_name" class="swal2-input" placeholder="name">' +
+				'<input id="sw_sub_ext" class="swal2-input" placeholder="external id (optional)">' +
+				'<input id="sw_sub_tin" class="swal2-input" placeholder="TIN (optional)">',
+			focusConfirm: false,
+			showCancelButton: true,
+			preConfirm: () => {
+				return {
+					subsidiary_type: document.getElementById("sw_sub_type").value,
+					name: document.getElementById("sw_sub_name").value,
+					external_id: document.getElementById("sw_sub_ext").value,
+					tin: document.getElementById("sw_sub_tin").value,
+				};
+			},
+		}).then((result) => {
+			if (!result.isConfirmed) return;
+			$.post(`${BASE_URL}createsubsidiary`, result.value, function (res) {
+				if (res && res.success) {
+					Swal.fire({ title: "Saved", icon: "success", timer: 1500 });
+					loadSubsidiaries();
+				} else {
+					Swal.fire({ title: "Failed", text: (res && res.message) || "", icon: "error" });
+				}
+			});
+		});
+	});
+
 	//end
 
 	//generate tb
@@ -558,6 +704,17 @@ $(document).ready(function () {
 					})
 					.get();
 
+				let subsidiary_id = $(".sub_id")
+					.map(function () {
+						return $(this).val();
+					})
+					.get();
+				let subsidiary_type = $(".sub_type")
+					.map(function () {
+						return $(this).val();
+					})
+					.get();
+
 				$.post(
 					`${BASE_URL}savejev`,
 					{
@@ -574,6 +731,8 @@ $(document).ready(function () {
 						acct_c: acct_c,
 						debit: debit,
 						credit: credit,
+						subsidiary_id: subsidiary_id,
+						subsidiary_type: subsidiary_type,
 						type: type,
 					},
 					function (res) {
@@ -632,6 +791,17 @@ $(document).ready(function () {
 					})
 					.get();
 
+				let subsidiary_id = $(".sub_id")
+					.map(function () {
+						return $(this).val();
+					})
+					.get();
+				let subsidiary_type = $(".sub_type")
+					.map(function () {
+						return $(this).val();
+					})
+					.get();
+
 				$.post(
 					`${BASE_URL}savejev`,
 					{
@@ -650,6 +820,8 @@ $(document).ready(function () {
 						acct_c: acct_c,
 						debit: debit,
 						credit: credit,
+						subsidiary_id: subsidiary_id,
+						subsidiary_type: subsidiary_type,
 						type: type,
 					},
 					function (res) {
@@ -706,6 +878,17 @@ $(document).ready(function () {
 					})
 					.get();
 
+				let subsidiary_id = $(".sub_id")
+					.map(function () {
+						return $(this).val();
+					})
+					.get();
+				let subsidiary_type = $(".sub_type")
+					.map(function () {
+						return $(this).val();
+					})
+					.get();
+
 				$.post(
 					`${BASE_URL}savejev`,
 					{
@@ -721,6 +904,8 @@ $(document).ready(function () {
 						acct_c: acct_c,
 						debit: debit,
 						credit: credit,
+						subsidiary_id: subsidiary_id,
+						subsidiary_type: subsidiary_type,
 						type: type,
 					},
 					function (res) {
@@ -782,6 +967,17 @@ $(document).ready(function () {
 					})
 					.get();
 
+				let subsidiary_id = $(".sub_id")
+					.map(function () {
+						return $(this).val();
+					})
+					.get();
+				let subsidiary_type = $(".sub_type")
+					.map(function () {
+						return $(this).val();
+					})
+					.get();
+
 				$.post(
 					`${BASE_URL}savejev`,
 					{
@@ -802,6 +998,8 @@ $(document).ready(function () {
 						acct_c: acct_c,
 						debit: debit,
 						credit: credit,
+						subsidiary_id: subsidiary_id,
+						subsidiary_type: subsidiary_type,
 						type: type,
 					},
 					function (res) {

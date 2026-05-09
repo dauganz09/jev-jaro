@@ -10,6 +10,7 @@ use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 
 class Administrator extends CI_Controller {
 	private $previewMode = false;
+	private $subsidiaryTable = 'tbl_subsidiaries';
 
 	private function enablePreviewMode(){
 		$this->previewMode = true;
@@ -81,6 +82,105 @@ class Administrator extends CI_Controller {
 		}
 
 		return 0;
+	}
+
+	private function hasSubsidiaryMaster(){
+		return $this->db->table_exists($this->subsidiaryTable);
+	}
+
+	public function getsubsidiaries(){
+		if(!$this->hasSubsidiaryMaster()){
+			return $this->output
+				->set_content_type('application/json')
+				->set_output(json_encode(array()));
+		}
+
+		$q = trim((string) $this->input->get('q'));
+		$type = trim((string) $this->input->get('type'));
+		$limit = (int) $this->input->get('limit');
+		if($limit <= 0 || $limit > 200){
+			$limit = 50;
+		}
+
+		$this->db->from($this->subsidiaryTable);
+		$this->db->where('is_active', 1);
+		if($type !== ''){
+			$this->db->where('subsidiary_type', $type);
+		}
+		if($q !== ''){
+			$this->db->like('name', $q);
+		}
+		$this->db->order_by('subsidiary_type', 'ASC');
+		$this->db->order_by('name', 'ASC');
+		$this->db->limit($limit);
+
+		$rows = $this->db->get()->result_array();
+		return $this->output
+			->set_content_type('application/json')
+			->set_output(json_encode($rows));
+	}
+
+	public function createsubsidiary(){
+		if(!$this->hasSubsidiaryMaster()){
+			return $this->output
+				->set_content_type('application/json')
+				->set_output(json_encode(array(
+					'success' => false,
+					'message' => 'Subsidiary master table is missing. Apply the migration first.'
+				)));
+		}
+
+		$type = trim((string) $this->input->post('subsidiary_type'));
+		$rawName = (string) $this->input->post('name');
+		$name = preg_replace('/\s+/u', ' ', trim($rawName));
+		$externalId = trim((string) $this->input->post('external_id'));
+		$tin = trim((string) $this->input->post('tin'));
+
+		if($type === '' || $name === ''){
+			return $this->output
+				->set_content_type('application/json')
+				->set_output(json_encode(array(
+					'success' => false,
+					'message' => 'subsidiary_type and name are required.'
+				)));
+		}
+
+		$normKey = function_exists('mb_strtolower') ? mb_strtolower($name, 'UTF-8') : strtolower($name);
+		$table = $this->db->dbprefix($this->subsidiaryTable);
+		$dup = $this->db->query(
+			'SELECT subsidiary_id, name FROM `'.$table.'` WHERE subsidiary_type = ? AND LOWER(TRIM(REGEXP_REPLACE(TRIM(name), ?, ?))) = ? LIMIT 1',
+			array($type, '[[:space:]]+', ' ', $normKey)
+		)->row_array();
+
+		if(!empty($dup['subsidiary_id'])){
+			return $this->output
+				->set_content_type('application/json')
+				->set_output(json_encode(array(
+					'success' => true,
+					'subsidiary_id' => (int) $dup['subsidiary_id'],
+					'duplicate_of_existing' => true,
+					'canonical_name' => $dup['name']
+				)));
+		}
+
+		$insert = array(
+			'subsidiary_type' => $type,
+			'name' => $name,
+			'external_id' => ($externalId !== '' ? $externalId : null),
+			'tin' => ($tin !== '' ? $tin : null),
+			'is_active' => 1
+		);
+
+		$this->db->insert($this->subsidiaryTable, $insert);
+		$id = $this->db->insert_id();
+
+		return $this->output
+			->set_content_type('application/json')
+			->set_output(json_encode(array(
+				'success' => $id > 0,
+				'subsidiary_id' => $id,
+				'duplicate_of_existing' => false
+			)));
 	}
 
 	
@@ -539,13 +639,22 @@ if (!empty($result)) {
 		$this->db->where('jev_id',$id);
 		$res = $this->db->get('tbl_jev');
 		$data['jev'] = $res->row_array();
+		$jevRow = $data['jev'];
 
-		$this->db->where('jev_no',$res->row_array()['jev_no']);
-		$this->db->where('jev_id',$res->row_array()['jev_id']);
-		$this->db->order_by('acc_code','ASC');
-		$res2 = $this->db->get('tbl_jevdata');
-
-		$data['jd'] = $res2->result_array();
+		if($this->hasSubsidiaryMaster()){
+			$this->db->select('jd.*, s.name AS subsidiary_name');
+			$this->db->from('tbl_jevdata jd');
+			$this->db->join($this->subsidiaryTable.' s', 'jd.subsidiary_id = s.subsidiary_id', 'left');
+			$this->db->where('jd.jev_no', $jevRow['jev_no']);
+			$this->db->where('jd.jev_id', $jevRow['jev_id']);
+			$this->db->order_by('jd.acc_code', 'ASC');
+			$data['jd'] = $this->db->get()->result_array();
+		}else{
+			$this->db->where('jev_no', $jevRow['jev_no']);
+			$this->db->where('jev_id', $jevRow['jev_id']);
+			$this->db->order_by('acc_code','ASC');
+			$data['jd'] = $this->db->get('tbl_jevdata')->result_array();
+		}
 
 		$this->load->view('templates/header.php',$data);
 		$this->load->view('templates/sidebar.php',$data);
@@ -620,8 +729,13 @@ if (!empty($result)) {
 		$acct_c = $this->input->post('acct_c');
 		$debit = $this->input->post('debit');
 		$credit = $this->input->post('credit');
+		$subsidiaryIds = $this->input->post('subsidiary_id');
+		$subsidiaryTypes = $this->input->post('subsidiary_type');
+		$subsidiaryRefs = $this->input->post('subsidiary_ref');
 		$cat = count($acct_t);
 		$cac = count($acct_c);
+
+		$hasSubsidiaryColumns = $this->db->field_exists('subsidiary_id', 'tbl_jevdata');
 
 		// $this->db->where('jev_no',$this->input->post('jev_no'));
 		// $this->db->where('brgy',$this->input->post('brgy'));
@@ -671,6 +785,11 @@ if (!empty($result)) {
 						'credit'=> $credit[$i]
 
 					);
+					if($hasSubsidiaryColumns){
+						$data_array['subsidiary_id'] = is_array($subsidiaryIds) && isset($subsidiaryIds[$i]) && $subsidiaryIds[$i] !== '' ? (int)$subsidiaryIds[$i] : null;
+						$data_array['subsidiary_type'] = is_array($subsidiaryTypes) && isset($subsidiaryTypes[$i]) && $subsidiaryTypes[$i] !== '' ? $subsidiaryTypes[$i] : null;
+						$data_array['subsidiary_ref'] = is_array($subsidiaryRefs) && isset($subsidiaryRefs[$i]) && $subsidiaryRefs[$i] !== '' ? $subsidiaryRefs[$i] : null;
+					}
 
 					$res2 = $this->db->insert('tbl_jevdata',$data_array);
 				}
@@ -696,6 +815,11 @@ if (!empty($result)) {
 						'credit'=> $credit[$i]
 
 					);
+					if($hasSubsidiaryColumns){
+						$data_array['subsidiary_id'] = is_array($subsidiaryIds) && isset($subsidiaryIds[$i]) && $subsidiaryIds[$i] !== '' ? (int)$subsidiaryIds[$i] : null;
+						$data_array['subsidiary_type'] = is_array($subsidiaryTypes) && isset($subsidiaryTypes[$i]) && $subsidiaryTypes[$i] !== '' ? $subsidiaryTypes[$i] : null;
+						$data_array['subsidiary_ref'] = is_array($subsidiaryRefs) && isset($subsidiaryRefs[$i]) && $subsidiaryRefs[$i] !== '' ? $subsidiaryRefs[$i] : null;
+					}
 
 					$res2 = $this->db->insert('tbl_jevdata',$data_array);
 				}
@@ -716,6 +840,11 @@ if (!empty($result)) {
 						'credit'=> $credit[$i]
 
 					);
+					if($hasSubsidiaryColumns){
+						$data_array['subsidiary_id'] = is_array($subsidiaryIds) && isset($subsidiaryIds[$i]) && $subsidiaryIds[$i] !== '' ? (int)$subsidiaryIds[$i] : null;
+						$data_array['subsidiary_type'] = is_array($subsidiaryTypes) && isset($subsidiaryTypes[$i]) && $subsidiaryTypes[$i] !== '' ? $subsidiaryTypes[$i] : null;
+						$data_array['subsidiary_ref'] = is_array($subsidiaryRefs) && isset($subsidiaryRefs[$i]) && $subsidiaryRefs[$i] !== '' ? $subsidiaryRefs[$i] : null;
+					}
 
 					$res2 = $this->db->insert('tbl_jevdata',$data_array);
 				}
@@ -741,6 +870,11 @@ if (!empty($result)) {
 						'credit'=> $credit[$i]
 
 					);
+					if($hasSubsidiaryColumns){
+						$data_array['subsidiary_id'] = is_array($subsidiaryIds) && isset($subsidiaryIds[$i]) && $subsidiaryIds[$i] !== '' ? (int)$subsidiaryIds[$i] : null;
+						$data_array['subsidiary_type'] = is_array($subsidiaryTypes) && isset($subsidiaryTypes[$i]) && $subsidiaryTypes[$i] !== '' ? $subsidiaryTypes[$i] : null;
+						$data_array['subsidiary_ref'] = is_array($subsidiaryRefs) && isset($subsidiaryRefs[$i]) && $subsidiaryRefs[$i] !== '' ? $subsidiaryRefs[$i] : null;
+					}
 
 					$res2 = $this->db->insert('tbl_jevdata',$data_array);
 				}
@@ -841,9 +975,13 @@ if (!empty($result)) {
 		$jdid = $this->input->post('jdid');
 		$debit = $this->input->post('debit');
 		$credit = $this->input->post('credit');
+		$subsidiaryIds = $this->input->post('subsidiary_id');
+		$subsidiaryTypes = $this->input->post('subsidiary_type');
+		$subsidiaryRefs = $this->input->post('subsidiary_ref');
 		$cat = count($acct_t);
 		$cac = count($acct_c);
 
+		$hasSubsidiaryColumns = $this->db->field_exists('subsidiary_id', 'tbl_jevdata');
 		
 
 
@@ -981,6 +1119,11 @@ if (!empty($result)) {
 						'credit'=> $credit[$i]
 
 					);
+					if($hasSubsidiaryColumns){
+						$data_array['subsidiary_id'] = is_array($subsidiaryIds) && isset($subsidiaryIds[$i]) && $subsidiaryIds[$i] !== '' ? (int)$subsidiaryIds[$i] : null;
+						$data_array['subsidiary_type'] = is_array($subsidiaryTypes) && isset($subsidiaryTypes[$i]) && $subsidiaryTypes[$i] !== '' ? $subsidiaryTypes[$i] : null;
+						$data_array['subsidiary_ref'] = is_array($subsidiaryRefs) && isset($subsidiaryRefs[$i]) && $subsidiaryRefs[$i] !== '' ? $subsidiaryRefs[$i] : null;
+					}
 					$this->db->where('jevdata_id', $jdid[$i]);
 					$res2 = $this->db->update('tbl_jevdata',$data_array);
 				}
@@ -1005,6 +1148,11 @@ if (!empty($result)) {
 						'credit'=> $credit[$i]
 
 					);
+					if($hasSubsidiaryColumns){
+						$data_array['subsidiary_id'] = is_array($subsidiaryIds) && isset($subsidiaryIds[$i]) && $subsidiaryIds[$i] !== '' ? (int)$subsidiaryIds[$i] : null;
+						$data_array['subsidiary_type'] = is_array($subsidiaryTypes) && isset($subsidiaryTypes[$i]) && $subsidiaryTypes[$i] !== '' ? $subsidiaryTypes[$i] : null;
+						$data_array['subsidiary_ref'] = is_array($subsidiaryRefs) && isset($subsidiaryRefs[$i]) && $subsidiaryRefs[$i] !== '' ? $subsidiaryRefs[$i] : null;
+					}
 					$this->db->where('jevdata_id', $jdid[$i]);
 					$res2 = $this->db->update('tbl_jevdata',$data_array);
 				}
@@ -1024,6 +1172,11 @@ if (!empty($result)) {
 						'credit'=> $credit[$i]
 
 					);
+					if($hasSubsidiaryColumns){
+						$data_array['subsidiary_id'] = is_array($subsidiaryIds) && isset($subsidiaryIds[$i]) && $subsidiaryIds[$i] !== '' ? (int)$subsidiaryIds[$i] : null;
+						$data_array['subsidiary_type'] = is_array($subsidiaryTypes) && isset($subsidiaryTypes[$i]) && $subsidiaryTypes[$i] !== '' ? $subsidiaryTypes[$i] : null;
+						$data_array['subsidiary_ref'] = is_array($subsidiaryRefs) && isset($subsidiaryRefs[$i]) && $subsidiaryRefs[$i] !== '' ? $subsidiaryRefs[$i] : null;
+					}
 
 					$this->db->where('jevdata_id', $jdid[$i]);
 					$res2 = $this->db->update('tbl_jevdata',$data_array);
@@ -1096,23 +1249,40 @@ if (!empty($result)) {
 		$acc_name = $this->input->post('acc_name');
 		$ltype = $this->input->post('l_type');
 		$gtype = $this->input->post('g_type');
+		$hasSubsidiaryId = $this->db->field_exists('subsidiary_id', 'tbl_jevdata');
 
 		if($gtype == 'sp'){
 
 		if($ltype == 's'){
-			$this->generateGeneralLedger($acc_code,$acc_name,$startDate,$endDate);
+			if($hasSubsidiaryId){
+				$this->generateSubsidiaryLedger($acc_code,$acc_name,$startDate,$endDate);
+			}else{
+				$this->generateGeneralLedger($acc_code,$acc_name,$startDate,$endDate);
+			}
 		
 		}elseif($ltype=='ss'){
-			$this->generateGeneralLedgerSS($acc_code,$acc_name,$startDate,$endDate);
+			if($hasSubsidiaryId){
+				$this->generateSubsidiarySchedule($acc_code,$acc_name,$startDate,$endDate);
+			}else{
+				$this->generateGeneralLedgerSS($acc_code,$acc_name,$startDate,$endDate);
+			}
 		}else{
 			$this->generateGeneralLedger2($acc_code,$acc_name,$startDate,$endDate);
 		}
 	}else{
 		if($ltype == 's'){
-			$this->generateGeneralLedgerAll($startDate,$endDate);
+			if($hasSubsidiaryId){
+				$this->generateSubsidiaryLedgerAll($startDate,$endDate);
+			}else{
+				$this->generateGeneralLedgerAll($startDate,$endDate);
+			}
 		
 		}elseif($ltype=='ss'){
-			$this->generateGeneralLedgerSSAll($startDate,$endDate);
+			if($hasSubsidiaryId){
+				$this->generateSubsidiaryScheduleAll($startDate,$endDate);
+			}else{
+				$this->generateGeneralLedgerSSAll($startDate,$endDate);
+			}
 		}else{
 			$this->generateGeneralLedger2All($startDate,$endDate);
 		}
@@ -1234,6 +1404,519 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 
 	}
 
+	public function generateSubsidiaryLedger($acc_code, $acc_name, $startDate, $endDate){
+		$this->load->helper('download');
+		$this->load->helper('file');
+
+		$brgyId = $this->getSelectedBrgyId();
+		$hasSubsidiaryMaster = $this->hasSubsidiaryMaster();
+
+		$this->db->select('jd.subsidiary_id, s.subsidiary_type, s.name as subsidiary_name');
+		$this->db->from('tbl_jevdata jd');
+		$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no');
+		if($hasSubsidiaryMaster){
+			$this->db->join($this->subsidiaryTable.' s', 'jd.subsidiary_id = s.subsidiary_id', 'left');
+		}else{
+			$this->db->join('(SELECT NULL as subsidiary_id, NULL as subsidiary_type, NULL as name) s', '1=0', 'left', false);
+		}
+		$this->db->where('j.brgy', $brgyId);
+		$this->db->where('jd.acc_code', $acc_code);
+		$this->db->where('j.jev_date >=', $startDate);
+		$this->db->where('j.jev_date <=', $endDate);
+		$this->db->where('jd.subsidiary_id IS NOT NULL', null, false);
+		$this->db->group_by('jd.subsidiary_id');
+		$this->db->order_by('s.subsidiary_type', 'ASC');
+		$this->db->order_by('s.name', 'ASC');
+		$subs = $this->db->get()->result_array();
+
+		if(empty($subs)){
+			return $this->respondNoData('No subsidiary-tagged entries found for this account/date range. Please encode subsidiary IDs on JEV line items.', '/gl');
+		}
+
+		$templatePath = FCPATH .'assets/templates/sl.xlsx';
+		$spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($templatePath);
+
+		$activeSheet = 0;
+		foreach($subs as $sub){
+			$subId = (int) $sub['subsidiary_id'];
+			$subName = (string) ($sub['subsidiary_name'] ?? ('Subsidiary '.$subId));
+			$newStr = str_replace(array('*', ':', '/', '\\', '?', '[', ']'), ' ', $subName);
+
+			if($activeSheet === 0){
+				$sheet = $spreadsheet->getSheetByName('SL') ?: $spreadsheet->getActiveSheet();
+				$sheet->setTitle(substr($newStr, 0, 30));
+			}else{
+				$clonedWorksheet = clone ($spreadsheet->getSheetByName('SL') ?: $spreadsheet->getActiveSheet());
+				$clonedWorksheet->setTitle(substr($newStr, 0, 30));
+				$spreadsheet->addSheet($clonedWorksheet);
+			}
+
+			$spreadsheet->setActiveSheetIndex($activeSheet);
+			$sheet = $spreadsheet->getActiveSheet();
+
+			// Fetch entries for this subsidiary
+			$sqlQuery = "SELECT
+				j.jev_date,
+				j.jev_no,
+				j.particulars,
+				j.type,
+				j.payor_payee,
+				jd.debit,
+				jd.credit
+			FROM tbl_jevdata jd
+			JOIN tbl_jev j ON jd.jev_no = j.jev_no AND jd.jev_id = j.jev_id
+			WHERE jd.acc_code = ?
+				AND jd.subsidiary_id = ?
+				AND j.jev_date BETWEEN ? AND ?
+				AND j.brgy = ?
+			ORDER BY j.jev_date, j.jev_no;";
+
+			$queryParams = array($acc_code, $subId, $startDate, $endDate, $brgyId);
+			$ledgerEntries = $this->db->query($sqlQuery, $queryParams)->result();
+
+			$startYear = date('Y', strtotime($startDate));
+			$beg = $this->getAccountBeginningBalance($brgyId, $startYear, $acc_code, $subId);
+			$begbald = $beg['debit'];
+			$begbalc = $beg['credit'];
+
+			// Header (best-effort; template may differ)
+			$sheet->setCellValue('A3', 'Barangay ' . $_SESSION['currbrgy']);
+			$sheet->setCellValue('A4', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
+			$sheet->setCellValue('C5', 'Account Name: '.$acc_name);
+			$sheet->setCellValue('C6', 'Subsidiary: '.$subName);
+			$sheet->setCellValue('F6', $acc_code);
+			$sheet->setCellValue('E10', $begbald);
+			$sheet->setCellValue('F10', $begbalc);
+
+			$currentMonth = date('Y-m', strtotime($startDate));
+			$rowIndex = 11;
+			$firstRow = 11;
+			$prevDebitTotalIndex = 10;
+			$prevCreditTotalIndex = 10;
+
+			foreach($ledgerEntries as $entry){
+				$entryMonth = date('Y-m', strtotime($entry->jev_date));
+				if($entryMonth != $currentMonth){
+					$rowIndex++;
+					$sheet->setCellValue('B' . $rowIndex, 'TOTAL THIS MONTH');
+					$sheet->setCellValue('E' . $rowIndex, '=SUM(E'.$firstRow.':E' . ($rowIndex - 2) . ')');
+					$sheet->setCellValue('F' . $rowIndex, '=SUM(F'.$firstRow.':F' . ($rowIndex - 2) . ')');
+					$sheet->setCellValue('B' . ($rowIndex+1), 'TOTAL TO DATE');
+					$sheet->setCellValue('E' . ($rowIndex+1), '=E'.$prevDebitTotalIndex.'+E' .$rowIndex);
+					$sheet->setCellValue('F' . ($rowIndex+1), '=F'.$prevCreditTotalIndex.'+F' .$rowIndex);
+					$sheet->setCellValue('G' . ($rowIndex+1), '=E'.($rowIndex+1).'-F' . ($rowIndex+1));
+					$prevDebitTotalIndex = $rowIndex+1;
+					$prevCreditTotalIndex = $rowIndex+1;
+					$rowIndex += 4;
+					$firstRow = $rowIndex;
+					$currentMonth = $entryMonth;
+				}
+
+				$sheet->setCellValue('A' . $rowIndex, $entry->jev_date);
+				$sheet->setCellValue('B' . $rowIndex, $entry->particulars);
+				$sheet->setCellValue('D' . $rowIndex, $entry->type.' '.substr($entry->jev_no, -3));
+				$sheet->setCellValue('E' . $rowIndex, $entry->debit);
+				$sheet->setCellValue('F' . $rowIndex, $entry->credit);
+				$rowIndex++;
+			}
+
+			$activeSheet++;
+		}
+
+		$spreadsheet->setActiveSheetIndex(0);
+		$currentDateTime = date('F-Y', strtotime($endDate));
+		$excelFileName = 'Subsidiary Ledger_' .ucfirst($_SESSION['currbrgy']).'-'.$currentDateTime . '.xlsx';
+		$excelFilePath = FCPATH . 'temp/' . $excelFileName;
+		$writer = new Xlsx($spreadsheet);
+		$writer->save($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
+	}
+
+	public function generateSubsidiaryLedgerAll($startDate, $endDate){
+		$this->load->helper('download');
+		$this->load->helper('file');
+
+		$this->db->order_by('code','ASC');
+		$accounts = $this->db->get('tbl_accounts')->result();
+
+		$templatePath = FCPATH .'assets/templates/sl.xlsx';
+		$spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($templatePath);
+		$baseSheet = $spreadsheet->getSheetByName('SL') ?: $spreadsheet->getActiveSheet();
+
+		$brgyId = $this->getSelectedBrgyId();
+		$hasSubsidiaryMaster = $this->hasSubsidiaryMaster();
+
+		$activeSheet = 0;
+		foreach($accounts as $a){
+			$sql = "SELECT DISTINCT jd.subsidiary_id
+				FROM tbl_jevdata jd
+				JOIN tbl_jev j ON jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no
+				WHERE j.brgy = ?
+					AND jd.acc_code = ?
+					AND jd.subsidiary_id IS NOT NULL
+					AND j.jev_date BETWEEN ? AND ?;";
+			$subs = $this->db->query($sql, array($brgyId, $a->code, $startDate, $endDate))->result_array();
+			if(empty($subs)){
+				continue;
+			}
+
+			foreach($subs as $subRow){
+				$subId = (int)$subRow['subsidiary_id'];
+				$subName = 'Subsidiary '.$subId;
+				if($hasSubsidiaryMaster){
+					$sub = $this->db->get_where($this->subsidiaryTable, array('subsidiary_id' => $subId))->row_array();
+					if($sub && isset($sub['name'])){
+						$subName = $sub['name'];
+					}
+				}
+
+				$title = substr(str_replace(array('*', ':', '/', '\\', '?', '[', ']'), ' ', $a->code.'-'.$subName), 0, 30);
+				if($activeSheet === 0){
+					$baseSheet->setTitle($title);
+				}else{
+					$cloned = clone $baseSheet;
+					$cloned->setTitle($title);
+					$spreadsheet->addSheet($cloned);
+				}
+
+				$spreadsheet->setActiveSheetIndex($activeSheet);
+				$sheet = $spreadsheet->getActiveSheet();
+
+				$sqlQuery = "SELECT
+					j.jev_date,
+					j.jev_no,
+					j.particulars,
+					j.type,
+					jd.debit,
+					jd.credit
+				FROM tbl_jevdata jd
+				JOIN tbl_jev j ON jd.jev_no = j.jev_no AND jd.jev_id = j.jev_id
+				WHERE jd.acc_code = ?
+					AND jd.subsidiary_id = ?
+					AND j.jev_date BETWEEN ? AND ?
+					AND j.brgy = ?
+				ORDER BY j.jev_date, j.jev_no;";
+				$ledgerEntries = $this->db->query($sqlQuery, array($a->code, $subId, $startDate, $endDate, $brgyId))->result();
+
+				$startYear = date('Y', strtotime($startDate));
+				$beg = $this->getAccountBeginningBalance($brgyId, $startYear, $a->code, $subId);
+				$begbald = $beg['debit'];
+				$begbalc = $beg['credit'];
+
+				$sheet->setCellValue('A3', 'Barangay ' . $_SESSION['currbrgy']);
+				$sheet->setCellValue('A4', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
+				$sheet->setCellValue('C5', 'Account Name: '.$a->name);
+				$sheet->setCellValue('C6', 'Subsidiary: '.$subName);
+				$sheet->setCellValue('F6', $a->code);
+				$sheet->setCellValue('E10', $begbald);
+				$sheet->setCellValue('F10', $begbalc);
+
+				$currentMonth = date('Y-m', strtotime($startDate));
+				$rowIndex = 11;
+				$firstRow = 11;
+				$prevDebitTotalIndex = 10;
+				$prevCreditTotalIndex = 10;
+				foreach($ledgerEntries as $entry){
+					$entryMonth = date('Y-m', strtotime($entry->jev_date));
+					if($entryMonth != $currentMonth){
+						$rowIndex++;
+						$sheet->setCellValue('B' . $rowIndex, 'TOTAL THIS MONTH');
+						$sheet->setCellValue('E' . $rowIndex, '=SUM(E'.$firstRow.':E' . ($rowIndex - 2) . ')');
+						$sheet->setCellValue('F' . $rowIndex, '=SUM(F'.$firstRow.':F' . ($rowIndex - 2) . ')');
+						$sheet->setCellValue('B' . ($rowIndex+1), 'TOTAL TO DATE');
+						$sheet->setCellValue('E' . ($rowIndex+1), '=E'.$prevDebitTotalIndex.'+E' .$rowIndex);
+						$sheet->setCellValue('F' . ($rowIndex+1), '=F'.$prevCreditTotalIndex.'+F' .$rowIndex);
+						$sheet->setCellValue('G' . ($rowIndex+1), '=E'.($rowIndex+1).'-F' . ($rowIndex+1));
+						$prevDebitTotalIndex = $rowIndex+1;
+						$prevCreditTotalIndex = $rowIndex+1;
+						$rowIndex += 4;
+						$firstRow = $rowIndex;
+						$currentMonth = $entryMonth;
+					}
+
+					$sheet->setCellValue('A' . $rowIndex, $entry->jev_date);
+					$sheet->setCellValue('B' . $rowIndex, $entry->particulars);
+					$sheet->setCellValue('D' . $rowIndex, $entry->type.' '.substr($entry->jev_no, -3));
+					$sheet->setCellValue('E' . $rowIndex, $entry->debit);
+					$sheet->setCellValue('F' . $rowIndex, $entry->credit);
+					$rowIndex++;
+				}
+
+				$activeSheet++;
+			}
+		}
+
+		if($activeSheet === 0){
+			return $this->respondNoData('No subsidiary-tagged entries found for the selected range.', '/gl');
+		}
+
+		$spreadsheet->setActiveSheetIndex(0);
+		$currentDateTime = date('F-Y', strtotime($endDate));
+		$excelFileName = 'Subsidiary Ledger_' .ucfirst($_SESSION['currbrgy']).'-'.$currentDateTime . '.xlsx';
+		$excelFilePath = FCPATH . 'temp/' . $excelFileName;
+		$writer = new Xlsx($spreadsheet);
+		$writer->save($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
+	}
+
+	public function generateSubsidiarySchedule($acc_code, $acc_name, $startDate, $endDate){
+		$this->load->helper('download');
+		$this->load->helper('file');
+
+		$brgyId = $this->getSelectedBrgyId();
+		$hasSubsidiaryMaster = $this->hasSubsidiaryMaster();
+
+		// Period totals per subsidiary
+		$this->db->select('jd.subsidiary_id');
+		$this->db->select_sum('jd.debit', 'total_debit');
+		$this->db->select_sum('jd.credit', 'total_credit');
+		$this->db->from('tbl_jevdata jd');
+		$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no');
+		$this->db->where('j.brgy', $brgyId);
+		$this->db->where('jd.acc_code', $acc_code);
+		$this->db->where('jd.subsidiary_id IS NOT NULL', null, false);
+		$this->db->where('j.jev_date >=', $startDate);
+		$this->db->where('j.jev_date <=', $endDate);
+		$this->db->group_by('jd.subsidiary_id');
+		$rows = $this->db->get()->result_array();
+
+		if(empty($rows)){
+			return $this->respondNoData('No subsidiary-tagged entries found for this account/date range.', '/gl');
+		}
+
+		// Build schedule rows with names + beginnings
+		$year = (int) date('Y', strtotime($startDate));
+		$schedule = array();
+		$totalEnding = 0.0;
+		foreach($rows as $row){
+			$subId = (int) $row['subsidiary_id'];
+			$name = 'Subsidiary '.$subId;
+			$type = null;
+			if($hasSubsidiaryMaster){
+				$sub = $this->db->get_where($this->subsidiaryTable, array('subsidiary_id' => $subId))->row_array();
+				if($sub){
+					$name = (string)($sub['name'] ?? $name);
+					$type = $sub['subsidiary_type'] ?? null;
+				}
+			}
+
+			$beg = $this->getAccountBeginningBalance($brgyId, $year, $acc_code, $subId);
+			$begNet = (float)$beg['debit'] - (float)$beg['credit'];
+			$periodNet = (float)$row['total_debit'] - (float)$row['total_credit'];
+			$ending = $begNet + $periodNet;
+
+			$schedule[] = array(
+				'subsidiary_id' => $subId,
+				'subsidiary_type' => $type,
+				'name' => $name,
+				'beg_debit' => (float)$beg['debit'],
+				'beg_credit' => (float)$beg['credit'],
+				'period_debit' => (float)$row['total_debit'],
+				'period_credit' => (float)$row['total_credit'],
+				'ending' => $ending
+			);
+			$totalEnding += $ending;
+		}
+
+		// Compute GL ending for the control account for reconciliation
+		$begAcc = $this->getAccountBeginningBalance($brgyId, $year, $acc_code, null);
+		$begAccNet = (float)$begAcc['debit'] - (float)$begAcc['credit'];
+		$this->db->select_sum('jd.debit', 'total_debit');
+		$this->db->select_sum('jd.credit', 'total_credit');
+		$this->db->from('tbl_jevdata jd');
+		$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no');
+		$this->db->where('j.brgy', $brgyId);
+		$this->db->where('jd.acc_code', $acc_code);
+		$this->db->where('j.jev_date >=', $startDate);
+		$this->db->where('j.jev_date <=', $endDate);
+		$tot = $this->db->get()->row_array();
+		$glEnding = $begAccNet + ((float)($tot['total_debit'] ?? 0) - (float)($tot['total_credit'] ?? 0));
+		$diff = $totalEnding - $glEnding;
+
+		usort($schedule, function($a, $b){
+			return strcmp((string)$a['name'], (string)$b['name']);
+		});
+
+		$templatePath = FCPATH .'assets/templates/ss.xlsx';
+		$spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($templatePath);
+		$sheet = $spreadsheet->getActiveSheet();
+
+		$sheet->setCellValue('A3', 'Barangay ' . $_SESSION['currbrgy']);
+		$sheet->setCellValue('A4', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
+		$sheet->setCellValue('A7', 'Account Name: '.$acc_name);
+		$sheet->setCellValue('E6', date('Y', strtotime($endDate)));
+		$sheet->setCellValue('E7', $acc_code);
+
+		$row = 10;
+		foreach($schedule as $item){
+			$sheet->setCellValue('A'.$row, $item['subsidiary_id']);
+			$sheet->setCellValue('B'.$row, $item['name']);
+			$sheet->setCellValue('C'.$row, $item['period_debit']);
+			$sheet->setCellValue('D'.$row, $item['period_credit']);
+			$sheet->setCellValue('E'.$row, $item['ending']);
+			$row++;
+		}
+
+		// Totals + reconciliation block (best-effort layout)
+		$sheet->setCellValue('B'.$row, 'TOTAL ENDING (SS)');
+		$sheet->setCellValue('E'.$row, $totalEnding);
+		$row += 2;
+		$sheet->setCellValue('B'.$row, 'GL ENDING (CONTROL)');
+		$sheet->setCellValue('E'.$row, $glEnding);
+		$row++;
+		$sheet->setCellValue('B'.$row, 'DIFFERENCE (SS - GL)');
+		$sheet->setCellValue('E'.$row, $diff);
+
+		$spreadsheet->setActiveSheetIndex(0);
+		$currentDateTime = date('F-Y', strtotime($endDate));
+		$excelFileName = 'Subsidiary Schedule_' .ucfirst($_SESSION['currbrgy']).'-'.$currentDateTime . '.xlsx';
+		$excelFilePath = FCPATH . 'temp/' . $excelFileName;
+		$writer = new Xlsx($spreadsheet);
+		$writer->save($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
+	}
+
+	public function generateSubsidiaryScheduleAll($startDate, $endDate){
+		$this->load->helper('download');
+		$this->load->helper('file');
+
+		$brgyId = $this->getSelectedBrgyId();
+		$this->db->order_by('code','ASC');
+		$accounts = $this->db->get('tbl_accounts')->result();
+
+		$templatePath = FCPATH .'assets/templates/ss.xlsx';
+		$spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($templatePath);
+		$baseSheet = $spreadsheet->getActiveSheet();
+
+		$hasSubsidiaryMaster = $this->hasSubsidiaryMaster();
+		$year = (int) date('Y', strtotime($startDate));
+
+		$activeSheet = 0;
+		foreach($accounts as $a){
+			// only include accounts with subsidiary-tagged entries in range
+			$sql = "SELECT 1
+				FROM tbl_jevdata jd
+				JOIN tbl_jev j ON jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no
+				WHERE j.brgy = ?
+					AND jd.acc_code = ?
+					AND jd.subsidiary_id IS NOT NULL
+					AND j.jev_date BETWEEN ? AND ?
+				LIMIT 1;";
+			$has = $this->db->query($sql, array($brgyId, $a->code, $startDate, $endDate))->num_rows() > 0;
+			if(!$has){
+				continue;
+			}
+
+			$title = substr(str_replace(array('*', ':', '/', '\\', '?', '[', ']'), ' ', $a->code), 0, 30);
+			if($activeSheet === 0){
+				$baseSheet->setTitle($title);
+			}else{
+				$cloned = clone $baseSheet;
+				$cloned->setTitle($title);
+				$spreadsheet->addSheet($cloned);
+			}
+			$spreadsheet->setActiveSheetIndex($activeSheet);
+
+			// Build SS rows for this account
+			$this->db->select('jd.subsidiary_id');
+			$this->db->select_sum('jd.debit', 'total_debit');
+			$this->db->select_sum('jd.credit', 'total_credit');
+			$this->db->from('tbl_jevdata jd');
+			$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no');
+			$this->db->where('j.brgy', $brgyId);
+			$this->db->where('jd.acc_code', $a->code);
+			$this->db->where('jd.subsidiary_id IS NOT NULL', null, false);
+			$this->db->where('j.jev_date >=', $startDate);
+			$this->db->where('j.jev_date <=', $endDate);
+			$this->db->group_by('jd.subsidiary_id');
+			$rows = $this->db->get()->result_array();
+			if(empty($rows)){
+				$activeSheet++;
+				continue;
+			}
+
+			$schedule = array();
+			$totalEnding = 0.0;
+			foreach($rows as $row){
+				$subId = (int) $row['subsidiary_id'];
+				$name = 'Subsidiary '.$subId;
+				if($hasSubsidiaryMaster){
+					$sub = $this->db->get_where($this->subsidiaryTable, array('subsidiary_id' => $subId))->row_array();
+					if($sub && isset($sub['name'])){
+						$name = (string)$sub['name'];
+					}
+				}
+				$beg = $this->getAccountBeginningBalance($brgyId, $year, $a->code, $subId);
+				$ending = ((float)$beg['debit'] - (float)$beg['credit']) + ((float)$row['total_debit'] - (float)$row['total_credit']);
+				$schedule[] = array(
+					'subsidiary_id' => $subId,
+					'name' => $name,
+					'period_debit' => (float)$row['total_debit'],
+					'period_credit' => (float)$row['total_credit'],
+					'ending' => $ending
+				);
+				$totalEnding += $ending;
+			}
+
+			$begAcc = $this->getAccountBeginningBalance($brgyId, $year, $a->code, null);
+			$begAccNet = (float)$begAcc['debit'] - (float)$begAcc['credit'];
+			$this->db->select_sum('jd.debit', 'total_debit');
+			$this->db->select_sum('jd.credit', 'total_credit');
+			$this->db->from('tbl_jevdata jd');
+			$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no');
+			$this->db->where('j.brgy', $brgyId);
+			$this->db->where('jd.acc_code', $a->code);
+			$this->db->where('j.jev_date >=', $startDate);
+			$this->db->where('j.jev_date <=', $endDate);
+			$tot = $this->db->get()->row_array();
+			$glEnding = $begAccNet + ((float)($tot['total_debit'] ?? 0) - (float)($tot['total_credit'] ?? 0));
+			$diff = $totalEnding - $glEnding;
+
+			usort($schedule, function($x, $y){
+				return strcmp((string)$x['name'], (string)$y['name']);
+			});
+
+			$sheet = $spreadsheet->getActiveSheet();
+			$sheet->setCellValue('A3', 'Barangay ' . $_SESSION['currbrgy']);
+			$sheet->setCellValue('A4', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
+			$sheet->setCellValue('A7', 'Account Name: '.$a->name);
+			$sheet->setCellValue('E6', date('Y', strtotime($endDate)));
+			$sheet->setCellValue('E7', $a->code);
+
+			$r = 10;
+			foreach($schedule as $item){
+				$sheet->setCellValue('A'.$r, $item['subsidiary_id']);
+				$sheet->setCellValue('B'.$r, $item['name']);
+				$sheet->setCellValue('C'.$r, $item['period_debit']);
+				$sheet->setCellValue('D'.$r, $item['period_credit']);
+				$sheet->setCellValue('E'.$r, $item['ending']);
+				$r++;
+			}
+			$sheet->setCellValue('B'.$r, 'TOTAL ENDING (SS)');
+			$sheet->setCellValue('E'.$r, $totalEnding);
+			$r += 2;
+			$sheet->setCellValue('B'.$r, 'GL ENDING (CONTROL)');
+			$sheet->setCellValue('E'.$r, $glEnding);
+			$r++;
+			$sheet->setCellValue('B'.$r, 'DIFFERENCE (SS - GL)');
+			$sheet->setCellValue('E'.$r, $diff);
+
+			$activeSheet++;
+		}
+
+		if($activeSheet === 0){
+			return $this->respondNoData('No subsidiary schedules available for the selected range.', '/gl');
+		}
+
+		$spreadsheet->setActiveSheetIndex(0);
+		$currentDateTime = date('F-Y', strtotime($endDate));
+		$excelFileName = 'Subsidiary Schedule_' .ucfirst($_SESSION['currbrgy']).'-'.$currentDateTime . '.xlsx';
+		$excelFilePath = FCPATH . 'temp/' . $excelFileName;
+		$writer = new Xlsx($spreadsheet);
+		$writer->save($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
+	}
+
 
 	public function generateGeneralLedgerAll($startDate,$endDate){
 		$this->load->helper('download');
@@ -1289,20 +1972,9 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 			$ledgerEntries = $query->result();
 			// $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$startYear = date('Y',strtotime($startDate));
-		
-		$begbald = 0;
-		$begbalc= 0;
-		$this->db->where('acc_code',$a->code);
-		$this->db->where('YEAR(bal_date)', $startYear);
-		$res2 = $this->db->get('tbl_begbal');
-
-		if($res2->num_rows()>0){
-			$this->output
-		->set_content_type('application/json')
-		->set_output(json_encode($res2->row_array()));
-		return;
-			
-		}
+		$beg = $this->getAccountBeginningBalance($this->getSelectedBrgyId(), $startYear, $a->code);
+		$begbald = $beg['debit'];
+		$begbalc = $beg['credit'];
 
 
 		// Get the active sheet
@@ -1555,20 +2227,9 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 			$ledgerEntries = $query->result();
 			// $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$startYear = date('Y',strtotime($startDate));
-		
-		$begbald = 0;
-		$begbalc= 0;
-		$this->db->where('acc_code',$a->code);
-		$this->db->where('YEAR(year)', $startYear);
-		$res2 = $this->db->get('tbl_begbal');
-
-		if($res2->num_rows()>0){
-			$this->output
-		->set_content_type('application/json')
-		->set_output(json_encode($res2->row_array()));
-		return;
-			
-		}
+		$beg = $this->getAccountBeginningBalance($this->getSelectedBrgyId(), $startYear, $a->code);
+		$begbald = $beg['debit'];
+		$begbalc = $beg['credit'];
 
 
 		// Get the active sheet
@@ -1919,22 +2580,12 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 	}
 
 	public function generateGL_file($result,$acc_code,$acc_name,$startDate,$endDate){
-		$startyear = date('Y',strtotime($startDate));
+		$startYear = date('Y',strtotime($startDate));
 		$this->load->helper('download');
 		$this->load->helper('file');
-		$begbald = 0;
-		$begbalc= 0;
-		$this->db->where('acc_code',$acc_code);
-		$this->db->where('YEAR(year)', $startYear);
-		$res2 = $this->db->get('tbl_begbal');
-
-		if($res2->num_rows()>0){
-			$this->output
-		->set_content_type('application/json')
-		->set_output(json_encode($res2->row_array()));
-		return;
-			
-		}
+		$beg = $this->getAccountBeginningBalance($this->getSelectedBrgyId(), $startYear, $acc_code);
+		$begbald = $beg['debit'];
+		$begbalc = $beg['credit'];
 
 		
 
@@ -1961,6 +2612,7 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$spreadsheet->getActiveSheet()->setCellValue('E10',$begbald);
 		$spreadsheet->getActiveSheet()->setCellValue('F10',$begbalc);
 
+		$runningBalance = (float)$begbald - (float)$begbalc;
 
 
 		$currentMonth = date('Y-m', strtotime($startDate));
@@ -2026,6 +2678,8 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$sheet->setCellValue('D' . $rowIndex, $entry->type.' '.substr($entry->jev_no, -3));
 		$sheet->setCellValue('E' . $rowIndex, $entry->debit);
 		$sheet->setCellValue('F' . $rowIndex, $entry->credit);
+		$runningBalance += ((float)$entry->debit - (float)$entry->credit);
+		$sheet->setCellValue('G' . $rowIndex, $runningBalance);
 		
 
 		
@@ -2036,6 +2690,8 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$sheet->setCellValue('D' . $rowIndex, $entry->type.' '.substr($entry->jev_no, -3));
 		$sheet->setCellValue('E' . $rowIndex, $entry->debit);
 		$sheet->setCellValue('F' . $rowIndex, $entry->credit);
+		$runningBalance += ((float)$entry->debit - (float)$entry->credit);
+		$sheet->setCellValue('G' . $rowIndex, $runningBalance);
 		
 		$rowIndex++;
 	}
@@ -2171,14 +2827,12 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 
 	
 	public function generateGL_file2($result,$acc_code,$acc_name,$startDate,$endDate){
-		$startyear = date('Y',strtotime($startDate));
+		$startYear = date('Y',strtotime($startDate));
 		$this->load->helper('download');
 		$this->load->helper('file');
-		$begbald = 0;
-		$begbalc= 0;
-		$this->db->where('acc_code',$acc_code);
-		$this->db->where('YEAR(year)', $startYear);
-		$res2 = $this->db->get('tbl_begbal');
+		$beg = $this->getAccountBeginningBalance($this->getSelectedBrgyId(), $startYear, $acc_code);
+		$begbald = $beg['debit'];
+		$begbalc = $beg['credit'];
 
 		// if($res2->num_rows()>0){
 		// 	$this->output
@@ -2213,6 +2867,7 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$spreadsheet->getActiveSheet()->setCellValue('E10',$begbald);
 		$spreadsheet->getActiveSheet()->setCellValue('F10',$begbalc);
 
+		$runningBalance = (float)$begbald - (float)$begbalc;
 
 
 		$currentMonth = date('Y-m', strtotime($startDate));
@@ -2278,6 +2933,8 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$sheet->setCellValue('D' . $rowIndex, $entry->type.' '.substr($entry->jev_no, -3));
 		$sheet->setCellValue('E' . $rowIndex, $entry->debit);
 		$sheet->setCellValue('F' . $rowIndex, $entry->credit);
+		$runningBalance += ((float)$entry->debit - (float)$entry->credit);
+		$sheet->setCellValue('G' . $rowIndex, $runningBalance);
 		
 
 		
@@ -2288,6 +2945,8 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$sheet->setCellValue('D' . $rowIndex, $entry->type.' '.substr($entry->jev_no, -3));
 		$sheet->setCellValue('E' . $rowIndex, $entry->debit);
 		$sheet->setCellValue('F' . $rowIndex, $entry->credit);
+		$runningBalance += ((float)$entry->debit - (float)$entry->credit);
+		$sheet->setCellValue('G' . $rowIndex, $runningBalance);
 		
 		$rowIndex++;
 	}
@@ -3945,6 +4604,45 @@ public function generatefpc_file($count,$startDate,$endDate){
 		return $balances;
 	}
 
+	private function getAccountBeginningBalance($brgyId, $year, $accountCode, $subsidiaryId = null){
+		$brgyId = (int) $brgyId;
+		$year = (int) $year;
+		$accountCode = (string) $accountCode;
+
+		if(!$this->db->table_exists('tbl_begbal')){
+			return array('debit' => 0.0, 'credit' => 0.0);
+		}
+
+		$hasYear = $this->db->field_exists('year', 'tbl_begbal');
+		$hasBrgy = $this->db->field_exists('brgy_id', 'tbl_begbal');
+		$hasBalDate = $this->db->field_exists('bal_date', 'tbl_begbal');
+
+		$this->db->select_sum('debit', 'total_debit');
+		$this->db->select_sum('credit', 'total_credit');
+		$this->db->from('tbl_begbal');
+		$this->db->where('acc_code', $accountCode);
+		if($hasBrgy){
+			$this->db->where('brgy_id', $brgyId);
+		}
+		if($subsidiaryId !== null && $this->db->field_exists('subsidiary_id', 'tbl_begbal')){
+			$this->db->where('subsidiary_id', (int)$subsidiaryId);
+		}
+
+		if($hasYear){
+			$this->db->where('year', $year);
+		}else if($hasBalDate){
+			$this->db->where('YEAR(bal_date)', $year);
+		}else{
+			return array('debit' => 0.0, 'credit' => 0.0);
+		}
+
+		$row = $this->db->get()->row_array();
+		return array(
+			'debit' => isset($row['total_debit']) ? (float) $row['total_debit'] : 0.0,
+			'credit' => isset($row['total_credit']) ? (float) $row['total_credit'] : 0.0
+		);
+	}
+
 	private function mergeMonthlyRows(&$monthlyBase, $rows){
 		foreach($rows as $row){
 			$monthKey = sprintf('%04d-%02d-01', (int)$row['year'], (int)$row['month']);
@@ -5233,9 +5931,8 @@ if(isset($_FILES["rpic"])){
 	public function setbalance(){
 		$date=strtotime($this->input->post('year').'-01-01');
 		$bdate = date('Y-m-d',$date);
-
-
-
+		$brgyId = $this->getSelectedBrgyId();
+		$year = (int) $this->input->post('year');
 
 		$b_array = array(
 			'acc_code'=>$this->input->post('acc_code'),
@@ -5244,6 +5941,12 @@ if(isset($_FILES["rpic"])){
 			'credit'=>$this->input->post('credit'),
 			'date_created'=> date('Y-m-d')
 		);
+		if($this->db->field_exists('brgy_id', 'tbl_begbal')){
+			$b_array['brgy_id'] = $brgyId;
+		}
+		if($this->db->field_exists('year', 'tbl_begbal')){
+			$b_array['year'] = $year;
+		}
 
 		$res = $this->db->insert('tbl_begbal',$b_array);
 
