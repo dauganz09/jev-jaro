@@ -9,6 +9,79 @@ use PhpOffice\PhpSpreadsheet\Writer\Xlsx;
 use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 
 class Administrator extends CI_Controller {
+	private $previewMode = false;
+
+	private function enablePreviewMode(){
+		$this->previewMode = true;
+	}
+
+	private function isPreviewRequest(){
+		return $this->previewMode === true;
+	}
+
+	private function respondNoData($message, $redirectPath){
+		if($this->isPreviewRequest()){
+			$this->output
+				->set_content_type('application/json')
+				->set_output(json_encode(array(
+					'success' => false,
+					'message' => $message
+				)));
+			return false;
+		}
+
+		$this->session->set_flashdata('error', $message);
+		redirect($redirectPath);
+		return false;
+	}
+
+	private function respondWithSpreadsheetFile($excelFileName, $excelFilePath){
+		if($this->isPreviewRequest()){
+			$previewSpreadsheet = IOFactory::load($excelFilePath);
+			$htmlWriter = IOFactory::createWriter($previewSpreadsheet, 'Html');
+			$sheetNames = $previewSpreadsheet->getSheetNames();
+			$previewSheets = array();
+
+			foreach($sheetNames as $sheetIndex => $sheetName){
+				if(method_exists($htmlWriter, 'setSheetIndex')){
+					$htmlWriter->setSheetIndex($sheetIndex);
+				}
+
+				ob_start();
+				$htmlWriter->save('php://output');
+				$previewSheets[] = array(
+					'name' => $sheetName,
+					'html' => ob_get_clean()
+				);
+			}
+			delete_files($excelFilePath);
+
+			return $this->output
+				->set_content_type('application/json')
+				->set_output(json_encode(array(
+					'success' => true,
+					'fileName' => $excelFileName,
+					'previewSheets' => $previewSheets
+				)));
+		}
+
+		$fileContents = file_get_contents($excelFilePath);
+		delete_files($excelFilePath);
+		force_download($excelFileName, $fileContents);
+	}
+
+	private function getSelectedBrgyId(){
+		if(isset($_SESSION['currbrgyid']) && $_SESSION['currbrgyid'] !== ''){
+			return (int) $_SESSION['currbrgyid'];
+		}
+
+		$postBrgy = (int) $this->input->post('brgy');
+		if($postBrgy > 0){
+			return $postBrgy;
+		}
+
+		return 0;
+	}
 
 	
 	public function index()
@@ -362,6 +435,31 @@ if (!empty($result)) {
 }
 
 
+	}
+
+	public function getbegbalCashYear($id, $year){
+		$this->db->select('
+			SUM(CASE WHEN acc_code = "10101010" THEN debit ELSE 0 END) AS total_debit_10101010,
+			SUM(CASE WHEN acc_code = "10101010" THEN credit ELSE 0 END) AS total_credit_10101010,
+			SUM(CASE WHEN acc_code = "10102020" THEN debit ELSE 0 END) AS total_debit_10102020,
+			SUM(CASE WHEN acc_code = "10102020" THEN credit ELSE 0 END) AS total_credit_10102020
+		');
+		$this->db->where('brgy_id', $id);
+		$this->db->where('year', $year);
+		$res = $this->db->get('tbl_begbal');
+
+		$result = $res->result_array();
+
+		if (!empty($result)) {
+			$row = $result[0];
+
+			$bal_10101010 = (float) $row['total_debit_10101010'] - (float) $row['total_credit_10101010'];
+			$bal_10102020 = (float) $row['total_debit_10102020'] - (float) $row['total_credit_10102020'];
+
+			return $bal_10101010 + $bal_10102020;
+		} else {
+			return 0;
+		}
 	}
 
 	
@@ -1022,6 +1120,11 @@ if (!empty($result)) {
 	}
 	}
 
+	public function previewLedger(){
+		$this->enablePreviewMode();
+		return $this->generateLedger();
+	}
+
 	
 	public function generateGeneralLedgerSS($acc_code,$acc_name,$startDate,$endDate){
 		
@@ -1052,8 +1155,7 @@ if (!empty($result)) {
 $queryParams = [$acc_code, $startDate, $endDate,$_SESSION['currbrgyid']];
 $query = $this->db->query($sqlQuery, $queryParams);
 		if($query->num_rows() == 0){
-			$this->session->set_flashdata('error', 'No Data Available for the specific Date range and Account Code!');
-			redirect('/gl');
+			return $this->respondNoData('No Data Available for the specific Date range and Account Code!', '/gl');
 
 		}else{
 		$ledgerEntries = $query->result();
@@ -1089,8 +1191,7 @@ $this->generateGLS_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 $queryParams = [$acc_code, $startDate, $endDate,$_SESSION['currbrgyid']];
 $query = $this->db->query($sqlQuery, $queryParams);
 		if($query->num_rows() == 0){
-			$this->session->set_flashdata('error', 'No Data Available for the specific Date range and Account Group!');
-			redirect('/gl');
+			return $this->respondNoData('No Data Available for the specific Date range and Account Group!', '/gl');
 
 		}else{
 		$ledgerEntries = $query->result();
@@ -1123,8 +1224,7 @@ $this->generateGL_file2($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 $queryParams = [$acc_code, $startDate, $endDate,$_SESSION['currbrgyid']];
 $query = $this->db->query($sqlQuery, $queryParams);
 		if($query->num_rows() == 0){
-			$this->session->set_flashdata('error', 'No Data Available for the specific Date range and Account Code!');
-			redirect('/gl');
+			return $this->respondNoData('No Data Available for the specific Date range and Account Code!', '/gl');
 
 		}else{
 		$ledgerEntries = $query->result();
@@ -1392,11 +1492,7 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 
@@ -1662,11 +1758,7 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 
@@ -1818,11 +1910,7 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 
@@ -2011,11 +2099,7 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 	}
@@ -2080,11 +2164,7 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 	}
@@ -2269,11 +2349,7 @@ $this->generateGL_file($ledgerEntries,$acc_code,$acc_name,$startDate,$endDate);
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 	}
@@ -2362,8 +2438,7 @@ foreach ($result as $row) {
 		$this->generatecsdj_file($organizedJevData,$startDate,$endDate);
 	}
 }else{
-	$this->session->set_flashdata('error', 'No Data Available for the specific Data range!');
-	redirect('/journals');
+	return $this->respondNoData('No Data Available for the specific Data range!', '/journals');
 }
 
 	
@@ -2372,6 +2447,11 @@ foreach ($result as $row) {
 	
 
 
+	}
+
+	public function previewGJ(){
+		$this->enablePreviewMode();
+		return $this->generateGJ();
 	}
 
 	
@@ -2511,11 +2591,7 @@ foreach ($result as $row) {
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 }
@@ -2647,11 +2723,7 @@ foreach ($result as $row) {
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 		
@@ -2780,11 +2852,7 @@ foreach ($result as $row) {
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 }
@@ -2927,11 +2995,7 @@ foreach ($result as $row) {
 			$writer = new Xlsx($spreadsheet);
 			// $writer->save('php://output');
 			$writer->save($excelFilePath);
-			
-						
-			// Trigger the download of the modified Excel file
-			force_download($excelFileName, file_get_contents($excelFilePath));
-			delete_files($excelFilePath);
+			return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 
 
 	}
@@ -2966,12 +3030,10 @@ foreach ($result as $row) {
 		if (empty($missingYears)) {
 			return true;
 		} else {
-			$this->session->set_flashdata('error', 'No Data Available for Year/s. '.implode(', ',$missingYears).' Please select a different  range!');
-			redirect('/fs_page');
+			return $this->respondNoData('No Data Available for Year/s. '.implode(', ',$missingYears).' Please select a different  range!', '/fs_page');
 		}
 		} else {
-			$this->session->set_flashdata('error', 'Selected Year range have no Data in database!!');
-			redirect('/fs_page');
+			return $this->respondNoData('Selected Year range have no Data in database!!', '/fs_page');
 		}
 	}
 
@@ -3048,6 +3110,11 @@ foreach ($result as $row) {
 	// ->set_output(json_encode($result));
 
 
+}
+
+public function previewFS(){
+	$this->enablePreviewMode();
+	return $this->generateFS();
 }
 
 //generate rrr
@@ -3172,11 +3239,7 @@ public function generateag_file($startDate,$endDate){
 	$writer = new Xlsx($spreadsheet);
 	// $writer->save('php://output');
 	$writer->save($excelFilePath);
-	
-				
-	// Trigger the download of the modified Excel file
-	force_download($excelFileName, file_get_contents($excelFilePath));
-	delete_files($excelFilePath);
+	return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 	
 
 
@@ -3322,11 +3385,7 @@ public function generatesba_file($startDate,$endDate){
 	$writer = new Xlsx($spreadsheet);
 	// $writer->save('php://output');
 	$writer->save($excelFilePath);
-	
-				
-	// Trigger the download of the modified Excel file
-	force_download($excelFileName, file_get_contents($excelFilePath));
-	delete_files($excelFilePath);
+	return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 	
 
 
@@ -3466,11 +3525,7 @@ public function generaterrr_file($startDate,$endDate){
 	$writer = new Xlsx($spreadsheet);
 	// $writer->save('php://output');
 	$writer->save($excelFilePath);
-	
-				
-	// Trigger the download of the modified Excel file
-	force_download($excelFileName, file_get_contents($excelFilePath));
-	delete_files($excelFilePath);
+	return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 	
 
 
@@ -3486,11 +3541,15 @@ public function generaterrr_file($startDate,$endDate){
 public function generatefpc_file($count,$startDate,$endDate){
 	$this->load->helper('download');
 	$this->load->helper('file');
+	$brgyId = $this->getSelectedBrgyId();
 	
 	//get data
 	$result = $this->getfp_data($startDate,$endDate);
 	$result2 = $this->getfpos_data($startDate,$endDate);
-	$bal_res = $this->getbegbalYear($_SESSION['currbrgyid'],date('Y', strtotime($startDate)));
+	if($result === false || $result2 === false){
+		return;
+	}
+	$bal_res = $this->getbegbalYear($brgyId,date('Y', strtotime($startDate)));
 	// $this->output
 	// ->set_content_type('application/json')
 	// ->set_output(json_encode($data));
@@ -3679,11 +3738,7 @@ public function generatefpc_file($count,$startDate,$endDate){
 	$writer = new Xlsx($spreadsheet);
 	// $writer->save('php://output');
 	$writer->save($excelFilePath);
-	
-				
-	// Trigger the download of the modified Excel file
-	force_download($excelFileName, file_get_contents($excelFilePath));
-	delete_files($excelFilePath);
+	return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 				
 	// Set a session flashdata with success message
 	// $this->session->set_flashdata('success_message', 'Successfully downloaded the Trial Balance');
@@ -3711,62 +3766,224 @@ public function generatefpc_file($count,$startDate,$endDate){
 //end functions
 
 	public function generateTB(){
-		
-			// Convert the date strings to 'YYYY-MM-DD' format
-			$startDate = date('Y-m-d', strtotime($this->input->post('sdate')));
-			$endDate = date('Y-m-d', strtotime($this->input->post('edate')));
-	
-			$this->db->select('a.name, a.code');
-			$this->db->select_sum('jd.debit', 'total_debit');
-			$this->db->select_sum('jd.credit', 'total_credit');
-			$this->db->from('tbl_accounts a');
-			$this->db->join('tbl_jevdata jd', 'a.code = jd.acc_code', 'left');
-			$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no AND j.jev_date >= \'' . $startDate . '\' AND j.jev_date <= \'' . $endDate . '\'', 'left');
-			$this->db->where('j.jev_date >=', $startDate);
-			$this->db->where('j.jev_date <=', $endDate);
-			$this->db->where('j.brgy', $this->input->post('brgy'));
+		$startDate = date('Y-m-d', strtotime($this->input->post('sdate')));
+		$endDate = date('Y-m-d', strtotime($this->input->post('edate')));
+		$brgyId = (int) $this->input->post('brgy');
 
-			$this->db->group_by('a.code');
-	
-			$query = $this->db->get();
-	
-			 
-		// 	 $this->output
-		// ->set_content_type('application/json')
-		// ->set_output(json_encode($query->result_array()));
+		$result = $this->buildTrialBalanceTotalsWithCarry($brgyId, $startDate, $endDate);
 
-		//version 2
-
-		// $startDate = date('Y-m-d', strtotime($this->input->post('sdate')));
-		// $endDate = date('Y-m-d', strtotime($this->input->post('edate')));
-		// $brgy = $this->input->post('brgy');
-
-		// $this->db->select('a.name AS account_name, a.code AS account_code, IFNULL(SUM(jd.debit), 0) AS total_debit, IFNULL(SUM(jd.credit), 0) AS total_credit');
-		// $this->db->from('tbl_accounts a');
-		// $this->db->join('tbl_jevdata jd', 'a.code = jd.acc_code', 'left');
-		// // $this->db->join('tbl_jev j', 'jd.jev_no = j.jev_no', 'left');
-		// $this->db->join('tbl_jev j', 'jd.jev_no = j.jev_no', 'left');
-		// $this->db->join('tbl_brgys b', 'j.brgy = b.brgy_id', 'left');
-		// $this->db->where('j.brgy',$brgy);
-		// $this->db->where('(j.jev_date BETWEEN "' . $startDate . '" AND "' . $endDate . '") OR j.jev_date IS NULL',null,false);
-		// $this->db->group_by('a.code');
-		// $this->db->order_by('a.account_id','ASC');
-		
-		// $query = $this->db->get();
-		if($query->num_rows()>0){
-		$result = $query->result();
-		$this->generatetb_file($result,$startDate,$endDate);
-
+		if(!empty($result)){
+			$this->generatetb_file($result,$startDate,$endDate);
 		}else{
-			$this->session->set_flashdata('error', 'No Data Available for the specific Data range!');
-			redirect('/tb_page');
+			return $this->respondNoData('No Data Available for the specific Data range!', '/tb_page');
 		}
-		
-		// 	 $this->output
-		// ->set_content_type('application/json')
-		// ->set_output(json_encode($result));
+	}
 
+	public function previewTB(){
+		$this->enablePreviewMode();
+		return $this->generateTB();
+	}
 
+	private function buildTrialBalanceTotalsWithCarry($brgyId, $startDate, $endDate){
+		$selectedStart = new DateTime($startDate);
+		$selectedEnd = new DateTime($endDate);
+
+		$selectedStartMonth = $selectedStart->format('Y-m-01');
+		$selectedEndMonth = $selectedEnd->format('Y-m-01');
+		$processStart = $selectedStart->format('Y') . '-01-01';
+
+		$monthlyBase = array();
+
+		$seedEnd = new DateTime($selectedStartMonth);
+		$seedEnd->modify('-1 day');
+		if($seedEnd->format('Y-m-d') >= $processStart){
+			$seedRows = $this->getMonthlyJevTotalsByAccount($brgyId, $processStart, $seedEnd->format('Y-m-d'));
+			$this->mergeMonthlyRows($monthlyBase, $seedRows);
+		}
+
+		$rangeRows = $this->getMonthlyJevTotalsByAccount($brgyId, $startDate, $endDate);
+		$this->mergeMonthlyRows($monthlyBase, $rangeRows);
+
+		$beginningBalanceEligibleCodes = array('10102020', '30101010');
+		$yearlyBeginningBalances = $this->getYearlyBeginningBalances(
+			$brgyId,
+			(int) $selectedStart->format('Y'),
+			(int) $selectedEnd->format('Y'),
+			$beginningBalanceEligibleCodes
+		);
+		$monthsToProcess = $this->buildMonthKeys($processStart, $selectedEndMonth);
+
+		$processedMonthlyLedger = array();
+		$monthlyCarry = array();
+		$cashInBankCode = '10102020';
+		$governmentEquityCode = '30101010';
+
+		foreach($monthsToProcess as $monthKey){
+			$year = substr($monthKey, 0, 4);
+			$month = substr($monthKey, 5, 2);
+			$monthLedger = isset($monthlyBase[$monthKey]) ? $monthlyBase[$monthKey] : array();
+
+			if($month === '01' && isset($yearlyBeginningBalances[$year])){
+				$yearBalances = $yearlyBeginningBalances[$year];
+
+				$cashDebitBeg = isset($yearBalances[$cashInBankCode]) ? (float) $yearBalances[$cashInBankCode]['debit'] : 0.0;
+				$cashCreditBeg = isset($yearBalances[$cashInBankCode]) ? (float) $yearBalances[$cashInBankCode]['credit'] : 0.0;
+
+				if(isset($yearBalances[$cashInBankCode])){
+					$this->addAccountAmount($monthLedger, $cashInBankCode, $cashDebitBeg, $cashCreditBeg);
+				}
+
+				// Force Government Equity (30101010) January beginning balance to mirror
+				// Cash in Bank (10102020) so the two are always equal at year start,
+				// regardless of the actual 30101010 value stored in tbl_begbal.
+				if($cashDebitBeg != 0.0 || $cashCreditBeg != 0.0){
+					$this->addAccountAmount($monthLedger, $governmentEquityCode, $cashCreditBeg, $cashDebitBeg);
+				}
+			}
+
+			if(isset($monthlyCarry[$monthKey])){
+				foreach($monthlyCarry[$monthKey] as $accountCode => $amounts){
+					$this->addAccountAmount($monthLedger, $accountCode, $amounts['debit'], $amounts['credit']);
+				}
+			}
+
+			$processedMonthlyLedger[$monthKey] = $monthLedger;
+
+			$cashDebit = isset($monthLedger[$cashInBankCode]) ? (float)$monthLedger[$cashInBankCode]['debit'] : 0.0;
+			$cashCredit = isset($monthLedger[$cashInBankCode]) ? (float)$monthLedger[$cashInBankCode]['credit'] : 0.0;
+			$net = $cashDebit - $cashCredit;
+
+			if($net != 0){
+				$nextMonth = new DateTime($monthKey);
+				$nextMonth->modify('+1 month');
+				$nextMonthKey = $nextMonth->format('Y-m-01');
+				if(!isset($monthlyCarry[$nextMonthKey])){
+					$monthlyCarry[$nextMonthKey] = array();
+				}
+
+				if($net > 0){
+					$this->addAccountAmount($monthlyCarry[$nextMonthKey], $cashInBankCode, $net, 0);
+					$this->addAccountAmount($monthlyCarry[$nextMonthKey], $governmentEquityCode, 0, $net);
+				}else{
+					$forwardAmount = abs($net);
+					$this->addAccountAmount($monthlyCarry[$nextMonthKey], $cashInBankCode, 0, $forwardAmount);
+					$this->addAccountAmount($monthlyCarry[$nextMonthKey], $governmentEquityCode, $forwardAmount, 0);
+				}
+			}
+		}
+
+		$finalTotals = array();
+		foreach($processedMonthlyLedger as $monthKey => $monthLedger){
+			if($monthKey < $selectedStartMonth || $monthKey > $selectedEndMonth){
+				continue;
+			}
+
+			foreach($monthLedger as $accountCode => $amounts){
+				$this->addAccountAmount($finalTotals, $accountCode, $amounts['debit'], $amounts['credit']);
+			}
+		}
+
+		ksort($finalTotals);
+		$result = array();
+		foreach($finalTotals as $accountCode => $amounts){
+			if((float)$amounts['debit'] == 0.0 && (float)$amounts['credit'] == 0.0){
+				continue;
+			}
+
+			$result[] = (object) array(
+				'code' => $accountCode,
+				'total_debit' => $amounts['debit'],
+				'total_credit' => $amounts['credit']
+			);
+		}
+
+		return $result;
+	}
+
+	private function getMonthlyJevTotalsByAccount($brgyId, $startDate, $endDate){
+		$this->db->select('YEAR(j.jev_date) AS year, MONTH(j.jev_date) AS month, jd.acc_code AS acc_code');
+		$this->db->select_sum('jd.debit', 'total_debit');
+		$this->db->select_sum('jd.credit', 'total_credit');
+		$this->db->from('tbl_jevdata jd');
+		$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no');
+		$this->db->where('j.brgy', $brgyId);
+		$this->db->where('j.jev_date >=', $startDate);
+		$this->db->where('j.jev_date <=', $endDate);
+		$this->db->group_by('YEAR(j.jev_date), MONTH(j.jev_date), jd.acc_code');
+
+		return $this->db->get()->result_array();
+	}
+
+	private function getYearlyBeginningBalances($brgyId, $startYear, $endYear, $accountCodes = array()){
+		$this->db->select('year, acc_code');
+		$this->db->select_sum('debit', 'total_debit');
+		$this->db->select_sum('credit', 'total_credit');
+		$this->db->from('tbl_begbal');
+		$this->db->where('brgy_id', $brgyId);
+		$this->db->where('year >=', $startYear);
+		$this->db->where('year <=', $endYear);
+		if(!empty($accountCodes)){
+			$this->db->where_in('acc_code', $accountCodes);
+		}
+		$this->db->group_by('year, acc_code');
+
+		$rows = $this->db->get()->result_array();
+		$balances = array();
+		foreach($rows as $row){
+			$year = (string)$row['year'];
+			$accountCode = $row['acc_code'];
+			if(!isset($balances[$year])){
+				$balances[$year] = array();
+			}
+
+			$balances[$year][$accountCode] = array(
+				'debit' => (float)$row['total_debit'],
+				'credit' => (float)$row['total_credit']
+			);
+		}
+
+		return $balances;
+	}
+
+	private function mergeMonthlyRows(&$monthlyBase, $rows){
+		foreach($rows as $row){
+			$monthKey = sprintf('%04d-%02d-01', (int)$row['year'], (int)$row['month']);
+			if(!isset($monthlyBase[$monthKey])){
+				$monthlyBase[$monthKey] = array();
+			}
+
+			$this->addAccountAmount(
+				$monthlyBase[$monthKey],
+				$row['acc_code'],
+				(float)$row['total_debit'],
+				(float)$row['total_credit']
+			);
+		}
+	}
+
+	private function addAccountAmount(&$ledger, $accountCode, $debit, $credit){
+		if(!isset($ledger[$accountCode])){
+			$ledger[$accountCode] = array(
+				'debit' => 0.0,
+				'credit' => 0.0
+			);
+		}
+
+		$ledger[$accountCode]['debit'] += (float)$debit;
+		$ledger[$accountCode]['credit'] += (float)$credit;
+	}
+
+	private function buildMonthKeys($startMonth, $endMonth){
+		$months = array();
+		$cursor = new DateTime($startMonth);
+		$end = new DateTime($endMonth);
+
+		while($cursor->getTimestamp() <= $end->getTimestamp()){
+			$months[] = $cursor->format('Y-m-01');
+			$cursor->modify('+1 month');
+		}
+
+		return $months;
 	}
 
 	
@@ -3855,11 +4072,7 @@ public function generatefpc_file($count,$startDate,$endDate){
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 					
 		// Set a session flashdata with success message
 		// $this->session->set_flashdata('success_message', 'Successfully downloaded the Trial Balance');
@@ -3923,6 +4136,10 @@ $query = $this->db->query($sql, $queryParams);
 
 
 	public function getfp_data($startDate,$endDate){
+		$brgyId = $this->getSelectedBrgyId();
+		if($brgyId <= 0){
+			return $this->respondNoData('No barangay selected for report preview.', '/fs_page');
+		}
 		$sql = "SELECT
         a.code AS acc_code,
         COALESCE(SUM(jd.debit), 0) AS total_debit,
@@ -3944,21 +4161,24 @@ $query = $this->db->query($sql, $queryParams);
         a.code";
 
 		
-$queryParams = [$startDate, $endDate,$_SESSION['currbrgyid']];
+$queryParams = [$startDate, $endDate,$brgyId];
 $query = $this->db->query($sql, $queryParams);
 	if($query->num_rows()>0){
 		return $result = $query->result();
 	
 
 	}else{
-		$this->session->set_flashdata('error', 'No Data Available for the specific Data range!');
-		redirect('/fs_page');
+		return $this->respondNoData('No Data Available for the specific Data range!', '/fs_page');
 	}
 
 	}
 
 	
 	public function getfpos_data($startDate,$endDate){
+		$brgyId = $this->getSelectedBrgyId();
+		if($brgyId <= 0){
+			return $this->respondNoData('No barangay selected for report preview.', '/fs_page');
+		}
 		$sql = "SELECT
         a.code AS acc_code,
         COALESCE(SUM(jd.debit), 0) AS total_debit,
@@ -3980,28 +4200,31 @@ $query = $this->db->query($sql, $queryParams);
         a.code";
 
 		
-$queryParams = [$startDate, $endDate,$_SESSION['currbrgyid']];
+$queryParams = [$startDate, $endDate,$brgyId];
 $query = $this->db->query($sql, $queryParams);
 if($query->num_rows()>0){
 	return $result = $query->result();
 
 
 }else{
-	$this->session->set_flashdata('error', 'No Data Available for the specific Data range!');
-	redirect('/fs_page');
+	return $this->respondNoData('No Data Available for the specific Data range!', '/fs_page');
 }
 
 	}
 
 	public function getBegBal($acc_code,$syear){
 		$year = date("Y",strtotime($syear));
+		$brgyId = $this->getSelectedBrgyId();
+		if($brgyId <= 0){
+			return 0;
+		}
 
 		$sql = "SELECT debit,credit,
     IFNULL(debit, 0) - IFNULL(credit, 0) AS debit_credit_difference 
 FROM tbl_begbal 
 WHERE acc_code = ? AND year = ? AND brgy_id = ?;";
 	
-	$queryParams = [$acc_code, $year,$_SESSION['currbrgyid']];
+	$queryParams = [$acc_code, $year,$brgyId];
 	$query = $this->db->query($sql, $queryParams);
 		if($query->num_rows()>0){
 			$result = $query->row_array();
@@ -4016,12 +4239,19 @@ WHERE acc_code = ? AND year = ? AND brgy_id = ?;";
 	public function generatefp_file($startDate,$endDate){
 		$this->load->helper('download');
 		$this->load->helper('file');
+		$brgyId = $this->getSelectedBrgyId();
+		if($brgyId <= 0){
+			return $this->respondNoData('No barangay selected for report preview.', '/fs_page');
+		}
 		
 		//get data
 		$result = $this->getfp_data($startDate,$endDate);
 		$result2 = $this->getfpos_data($startDate,$endDate);
-		$bal_res = $this->getbegbalYear($_SESSION['currbrgyid'],date('Y', strtotime($startDate)));
-		
+		if($result === false || $result2 === false){
+			return;
+		}
+		$bal_res = $this->getbegbalYear($brgyId,date('Y', strtotime($startDate)));
+		$cashBegBal = $this->getbegbalCashYear($brgyId, date('Y', strtotime($startDate)));
 		// return $this->output
 		// ->set_content_type('application/json')
 		// ->set_output(json_encode($bal_res));
@@ -4177,7 +4407,7 @@ WHERE acc_code = ? AND year = ? AND brgy_id = ?;";
 		$activeSheet->setCellValue('A7', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
 	
 		$activeSheet->setCellValue('F8',date('Y', strtotime($endDate)));
-		$activeSheet->setCellValue('F54', $bal_res);
+		$activeSheet->setCellValue('F54', $cashBegBal);
 
 		$spreadsheet->setActiveSheetIndex(5);
 		$activeSheet = $spreadsheet->getActiveSheet();
@@ -4209,6 +4439,39 @@ WHERE acc_code = ? AND year = ? AND brgy_id = ?;";
 		$activeSheet->setCellValue('A30',ucfirst($_SESSION['fname']. ' '.ucfirst($_SESSION['lname'])));
 		$activeSheet->setCellValue('A31',$_SESSION['position']);
 
+		// 7th sheet - Trial Balance (uses the same carry-forward logic as generateTB)
+		$spreadsheet->setActiveSheetIndex(6);
+		$activeSheet = $spreadsheet->getActiveSheet();
+
+		$tbResult = $this->buildTrialBalanceTotalsWithCarry($brgyId, $startDate, $endDate);
+
+		$activeSheet->setCellValue('A4', 'Barangay ' . $_SESSION['currbrgy']);
+		$activeSheet->setCellValue('A6', 'As of: '.date('F j, Y', strtotime($startDate)).' - '.date('F j, Y', strtotime($endDate)));
+		$activeSheet->setCellValue('A215', ucfirst($_SESSION['fname']).' '.ucfirst($_SESSION['lname']));
+		$activeSheet->setCellValue('A216', $_SESSION['position']);
+
+		$tbResultMap = array();
+		if (!empty($tbResult)) {
+			foreach ($tbResult as $item) {
+				$tbResultMap[$item->code] = array(
+					'debit' => $item->total_debit,
+					'credit' => $item->total_credit,
+				);
+			}
+		}
+
+		$tbRow = 11;
+		while ($activeSheet->getCell('B' . $tbRow)->getValue() !== null) {
+			$accountCode = $activeSheet->getCell('B' . $tbRow)->getValue();
+
+			if (isset($tbResultMap[$accountCode])) {
+				$activeSheet->setCellValue('C' . $tbRow, $tbResultMap[$accountCode]['debit']);
+				$activeSheet->setCellValue('D' . $tbRow, $tbResultMap[$accountCode]['credit']);
+			}
+
+			$tbRow++;
+		}
+
 		$spreadsheet->setActiveSheetIndex(0);
 
 
@@ -4229,11 +4492,7 @@ WHERE acc_code = ? AND year = ? AND brgy_id = ?;";
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+	return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 					
 		// Set a session flashdata with success message
 		// $this->session->set_flashdata('success_message', 'Successfully downloaded the Trial Balance');
@@ -4351,11 +4610,7 @@ WHERE acc_code = ? AND year = ? AND brgy_id = ?;";
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 			
 
 
@@ -4481,11 +4736,7 @@ WHERE acc_code = ? AND year = ? AND brgy_id = ?;";
 		$writer = new Xlsx($spreadsheet);
 		// $writer->save('php://output');
 		$writer->save($excelFilePath);
-		
-					
-		// Trigger the download of the modified Excel file
-		force_download($excelFileName, file_get_contents($excelFilePath));
-		delete_files($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 					
 		// Set a session flashdata with success message
 		// $this->session->set_flashdata('success_message', 'Successfully downloaded the Trial Balance');
@@ -4737,11 +4988,7 @@ WHERE acc_code = ? AND year = ? AND brgy_id = ?;";
 			$writer = new Xlsx($spreadsheet);
 			// $writer->save('php://output');
 			$writer->save($excelFilePath);
-			
-						
-			// Trigger the download of the modified Excel file
-			force_download($excelFileName, file_get_contents($excelFilePath));
-			delete_files($excelFilePath);
+			return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
 						
 			// Set a session flashdata with success message
 			// $this->session->set_flashdata('success_message', 'Successfully downloaded the Trial Balance');

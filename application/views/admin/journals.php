@@ -27,7 +27,7 @@
 						<div class="card-body pb-10">
 							<div class="row">
 								<div class="col-md-12">
-									<form method="post" action="<?=base_url('gj');?>">
+									<form method="post" action="<?=base_url('gj');?>" id="report_form">
                                     <input type="hidden" name="brgy" value="<?=$_SESSION['currbrgyid'];?>">
                                     <div class="row ">
                                         <div class="col-md-4 col-lg-4 col-sm-12">
@@ -134,11 +134,28 @@
                                                          Generate report
                                                     </button>
                                                 </div>
+                                                <div class="col-md-3 col-lg-3 col-sm-12">
+                                                    <button type="button" class="btn btn-outline-primary" id="preview_report_btn" data-preview-url="<?=base_url('gj_preview');?>">
+                                                         Preview report
+                                                    </button>
+                                                </div>
                                                 </form>
                             </div>
 						</div>
 					</div>
 					<!-- /Report Filter -->
+
+					<div class="card" id="preview_card" style="display:none;">
+						<div class="card-body">
+							<div class="row mb-3">
+								<div class="col-md-4 col-lg-4 col-sm-12">
+									<label for="preview_sheet_selector">Sheet</label>
+									<select class="form-control" id="preview_sheet_selector"></select>
+								</div>
+							</div>
+							<div id="preview_grid_container" style="height: 650px; width: 100%; overflow-x: auto; overflow-y: auto;"></div>
+						</div>
+					</div>
 
 					
 					
