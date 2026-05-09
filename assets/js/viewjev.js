@@ -225,6 +225,14 @@ $(document).ready(function(){
         '<input type="text" class="form-control acct_c input-fields">' +
       '</td>' +
       '<td>' +
+        '<input type="hidden" class="sub_id" value="">' +
+        '<input type="hidden" class="sub_type" value="">' +
+        '<div class="input-group input-group-sm flex-nowrap">' +
+        '<input type="text" class="form-control sub_name" placeholder="(optional) Enter — search" readonly>' +
+        '<button type="button" class="btn btn-outline-secondary sub_clear_btn" title="Clear subsidiary" aria-label="Clear subsidiary">&times;</button>' +
+        '</div>' +
+      '</td>' +
+      '<td>' +
         '<input type="text" class="form-control debitInput"  placeholder="0.00">' +
       '</td>' +
       '<td>' +
@@ -457,9 +465,12 @@ $(document).ready(function(){
     console.log($(this).val())
     return $(this).val()
 }).get()
+
+  let subsidiary_id = $('.sub_id').map(function(){ return $(this).val(); }).get();
+  let subsidiary_type = $('.sub_type').map(function(){ return $(this).val(); }).get();
   
   
-      $.post(`${BASE_URL}updatejev`,{dbjev_no:dbjev_no,jdid:jdid,jev_no : jev_no,jev_date :jev_date,fund : fund,payor : payor,or_no : or_no,or_date : or_date,parts:parts,resp_center: resp_center,brgy:brgy,acct_t:acct_t,acct_c:acct_c,debit :debit,credit:credit,type:type},function(res){
+      $.post(`${BASE_URL}updatejev`,{dbjev_no:dbjev_no,jdid:jdid,jev_no : jev_no,jev_date :jev_date,fund : fund,payor : payor,or_no : or_no,or_date : or_date,parts:parts,resp_center: resp_center,brgy:brgy,acct_t:acct_t,acct_c:acct_c,debit :debit,credit:credit,type:type,subsidiary_id:subsidiary_id,subsidiary_type:subsidiary_type},function(res){
         if(res){
           Swal.fire({
             title: `JEV Data Updated Successfully!`,
@@ -513,9 +524,12 @@ $(document).ready(function(){
     console.log($(this).val())
     return $(this).val()
 }).get()
+
+  let subsidiary_id = $('.sub_id').map(function(){ return $(this).val(); }).get();
+  let subsidiary_type = $('.sub_type').map(function(){ return $(this).val(); }).get();
   
   
-      $.post(`${BASE_URL}updatejev`,{dbjev_no:dbjev_no,jdid:jdid,jev_no : jev_no,jev_date :jev_date,fund : fund,payor : payor,v_no : v_no,chk_no : chk_no,chk_date : chk_date,bank_acct:bank_acct,parts:parts,resp_center: resp_center,brgy:brgy,acct_t:acct_t,acct_c:acct_c,debit :debit,credit:credit,type:type},function(res){
+      $.post(`${BASE_URL}updatejev`,{dbjev_no:dbjev_no,jdid:jdid,jev_no : jev_no,jev_date :jev_date,fund : fund,payor : payor,v_no : v_no,chk_no : chk_no,chk_date : chk_date,bank_acct:bank_acct,parts:parts,resp_center: resp_center,brgy:brgy,acct_t:acct_t,acct_c:acct_c,debit :debit,credit:credit,type:type,subsidiary_id:subsidiary_id,subsidiary_type:subsidiary_type},function(res){
         if(res){
           Swal.fire({
             title: `JEV Data Updated Successfully!`,
@@ -562,9 +576,12 @@ $(document).ready(function(){
     console.log($(this).val())
     return $(this).val()
 }).get()
+
+  let subsidiary_id = $('.sub_id').map(function(){ return $(this).val(); }).get();
+  let subsidiary_type = $('.sub_type').map(function(){ return $(this).val(); }).get();
   
   
-      $.post(`${BASE_URL}updatejev`,{dbjev_no:dbjev_no,jdid:jdid,jev_no : jev_no,jev_date :jev_date,fund : fund,payor : payor,vc_no : vc_no,parts:parts,resp_center: resp_center,brgy:brgy,acct_t:acct_t,acct_c:acct_c,debit :debit,credit:credit,type:type},function(res){
+      $.post(`${BASE_URL}updatejev`,{dbjev_no:dbjev_no,jdid:jdid,jev_no : jev_no,jev_date :jev_date,fund : fund,payor : payor,vc_no : vc_no,parts:parts,resp_center: resp_center,brgy:brgy,acct_t:acct_t,acct_c:acct_c,debit :debit,credit:credit,type:type,subsidiary_id:subsidiary_id,subsidiary_type:subsidiary_type},function(res){
         if(res){
           Swal.fire({
             title: `JEV Data Updated Successfully!!`,

@@ -33,6 +33,8 @@ $route['deletejev'] = 'administrator/deletejev';
 
 //GET
 $route['getaccounts'] = 'administrator/getaccounts';
+$route['getsubsidiaries'] = 'administrator/getsubsidiaries';
+$route['createsubsidiary'] = 'administrator/createsubsidiary';
 $route['tb'] = 'administrator/generateTB';
 $route['gj'] = 'administrator/generateGJ';
 $route['fs'] = 'administrator/generateFS';

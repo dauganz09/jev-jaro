@@ -153,6 +153,7 @@
 															<th>Accounts and Explanation</th>
                                                             
 															<th >Account Code</th>
+															<th>Subsidiary</th>
 															<th>Debit</th>
 															<th>Credit</th>
                                                             <th></th>
@@ -170,6 +171,14 @@
                                                            
 															<td>
 																<input type="text" class="form-control acct_c input-fields">
+															</td>
+															<td>
+																<input type="hidden" class="sub_id" value="">
+																<input type="hidden" class="sub_type" value="">
+																<div class="input-group input-group-sm flex-nowrap">
+																	<input type="text" class="form-control sub_name" placeholder="(optional) Enter — search" readonly>
+																	<button type="button" class="btn btn-outline-secondary sub_clear_btn" title="Clear subsidiary" aria-label="Clear subsidiary">&times;</button>
+																</div>
 															</td>
 															<td>
 																<input type="text" class="form-control debitInput"  placeholder="0.00">
@@ -248,6 +257,51 @@
 		</div>
 	</div>
 	<!-- end modal -->
+
+	<!--Subsidiary Modal-->
+	<div class="modal fade" id="subsidiary_modal" data-backdrop="static" tabindex="-1" role="dialog" aria-labelledby="staticBackdrop" >
+		<div class="modal-dialog modal-dialog-centered modal-lg" role="document">
+			<div class="modal-content">
+				<div class="modal-header">
+					<h5 class="modal-title" id="exampleModalLabel">Select Subsidiary</h5>
+					<button type="button" class="close" data-bs-dismiss="modal" aria-label="Close">
+						<i aria-hidden="true" class="fa fa-times"></i>
+					</button>
+				</div>
+				<div class="modal-body">
+					<div class="row mb-2">
+						<div class="col-md-4">
+							<select class="form-control" id="sub_filter_type">
+								<option value="">All types</option>
+								<option value="employee">employee</option>
+								<option value="supplier">supplier</option>
+								<option value="taxpayer">taxpayer</option>
+								<option value="agency">agency</option>
+								<option value="fund">fund</option>
+								<option value="other">other</option>
+							</select>
+						</div>
+						<div class="col-md-8 text-end">
+							<button type="button" class="btn btn-outline-primary" id="add_subsidiary_btn">Add subsidiary</button>
+						</div>
+					</div>
+					<table class="table border-0 table-hover mb-0 table-striped" id="tbl_subsidiaries">
+						<thead>
+							<th>Type</th>
+							<th>Name</th>
+							<th>External ID</th>
+							<th>TIN</th>
+						</thead>
+						<tbody></tbody>
+					</table>
+				</div>
+				<div class="modal-footer">
+					<button type="button" class="btn btn-light-primary font-weight-bold" data-bs-dismiss="modal">Close</button>
+				</div>
+			</div>
+		</div>
+	</div>
+	<!-- end subsidiary modal -->
 										<div class="row">
 											<div class="col-lg-6 col-md-6">
                                                     <div class="form-group">
