@@ -59,6 +59,9 @@ $route['fs_page'] = 'administrator/fs_page';
 $route['gl'] = 'administrator/gl_page';
 $route['jevlist'] = 'administrator/jevlist_page';
 $route['journals'] = 'administrator/journals_page';
+$route['bank_accounts'] = 'administrator/bank_accounts_page';
+$route['bank_recon'] = 'administrator/bank_recon_page';
+$route['chart_of_accounts'] = 'administrator/chart_of_accounts_page';
 $route['rrr_page'] = 'administrator/rrr_page';
 $route['sba_page'] = 'administrator/sba_page';
 $route['aging_page'] = 'administrator/aging_page';
@@ -67,6 +70,29 @@ $route['viewjev/(:num)'] = 'administrator/viewjev_page/$1';
 $route['bb_page'] = 'administrator/bb_page';
 $route['db_backup'] = 'administrator/db_backup';
 $route['logs'] = 'administrator/logs';
+
+// bank reconciliation APIs
+$route['api/bank_accounts'] = 'administrator/api_bank_accounts';
+$route['api/bank_accounts/save'] = 'administrator/api_bank_account_save';
+$route['api/bank_accounts/toggle'] = 'administrator/api_bank_account_toggle';
+$route['api/coa_accounts'] = 'administrator/api_coa_accounts';
+$route['api/coa_accounts/save'] = 'administrator/api_coa_account_save';
+$route['api/coa_accounts/delete'] = 'administrator/api_coa_account_delete';
+$route['api/bank_recon/upsert'] = 'administrator/api_bank_recon_upsert';
+$route['api/bank_recon/get'] = 'administrator/api_bank_recon_get';
+$route['api/bank_recon/lines'] = 'administrator/api_bank_recon_lines';
+$route['api/bank_recon/lines/add'] = 'administrator/api_bank_recon_line_add';
+$route['api/bank_recon/lines/delete'] = 'administrator/api_bank_recon_line_delete';
+$route['api/bank_recon/book_lines'] = 'administrator/api_bank_recon_book_lines';
+$route['api/bank_recon/suggest'] = 'administrator/api_bank_recon_suggest';
+$route['api/bank_recon/match/add'] = 'administrator/api_bank_recon_match_add';
+$route['api/bank_recon/match/delete'] = 'administrator/api_bank_recon_match_delete';
+$route['api/bank_recon/items'] = 'administrator/api_bank_recon_items';
+$route['api/bank_recon/items/add'] = 'administrator/api_bank_recon_item_add';
+$route['api/bank_recon/items/delete'] = 'administrator/api_bank_recon_item_delete';
+$route['api/bank_recon/items/create_jev'] = 'administrator/api_bank_recon_item_create_jev';
+$route['brs'] = 'administrator/generateBRS';
+$route['brs_preview'] = 'administrator/previewBRS';
 
 //beginning balance
 $route['savebb'] = 'administrator/savebb';

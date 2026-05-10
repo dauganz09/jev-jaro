@@ -98,8 +98,8 @@ JARO - JEV
 <span class="user-img">
 <img class="rounded-circle" src="<?php echo base_url('assets'); ?>/img/profiles/avatar-03.jpg" width="31" alt="MDRRMO">
 <div class="user-text">
-<h6><?php echo $_SESSION['fname'].' '.$_SESSION['lname']; ?></h6>
-<p class="text-muted mb-0"><?php echo $_SESSION['position'];?></p>
+<h6><?php echo htmlspecialchars(trim(($_SESSION['fname'] ?? '').' '.($_SESSION['lname'] ?? '')), ENT_QUOTES, 'UTF-8'); ?></h6>
+<p class="text-muted mb-0"><?php echo htmlspecialchars($_SESSION['position'] ?? '', ENT_QUOTES, 'UTF-8'); ?></p>
 </div>
 </span>
 </a>
