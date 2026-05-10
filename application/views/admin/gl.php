@@ -175,6 +175,11 @@
                                                          Preview
                                                     </button>
                                                 </div>
+                                                <div class="col-md-2 col-lg-2 col-sm-12">
+                                                    <button type="button" class="btn btn-outline-secondary d-none report-preview-pdf-btn" id="preview_pdf_btn" data-preview-url="<?=base_url('ledger_preview');?>">
+                                                         Preview PDF
+                                                    </button>
+                                                </div>
                                                 <div class="col-xl-2 col-md-2 col-lg-2 col-sm-12 col-12">
 													
 													<div class="form-group">

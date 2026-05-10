@@ -122,6 +122,11 @@
                                                          Preview report
                                                     </button>
                                                 </div>
+                                                <div class="col-md-3 col-lg-3 col-sm-12">
+                                                    <button type="button" class="btn btn-outline-secondary d-none report-preview-pdf-btn" id="preview_pdf_btn" data-preview-url="<?=base_url('tb_preview');?>">
+                                                         Preview PDF
+                                                    </button>
+                                                </div>
                                                 </form>
                             </div>
 						</div>

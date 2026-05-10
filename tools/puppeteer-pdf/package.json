@@ -1,0 +1,11 @@
+{
+  "name": "jev-jaro-puppeteer-pdf",
+  "private": true,
+  "description": "CLI helper for PHP: HTML file to PDF via Puppeteer. Run npm install in this directory after deploy.",
+  "scripts": {
+    "install-chrome": "PUPPETEER_CACHE_DIR=\"${PWD}/.puppeteer-cache\" npx puppeteer browsers install chrome"
+  },
+  "dependencies": {
+    "puppeteer": "^24.15.0"
+  }
+}

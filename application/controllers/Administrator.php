@@ -12,6 +12,7 @@ class Administrator extends CI_Controller {
 	private $previewMode = false;
 	private $subsidiaryTable = 'tbl_subsidiaries';
 	private $bankAccountsTable = 'tbl_bank_accounts';
+	private $pdfPreviewLastFailureSummary = '';
 
 	private function enablePreviewMode(){
 		$this->previewMode = true;
@@ -37,6 +38,443 @@ class Administrator extends CI_Controller {
 		return false;
 	}
 
+	private function writePdfPreviewFailureTraceFile($body){
+		$header = '=== '.date('c').' | SAPI='.PHP_SAPI." ===\n";
+		$full = $header.$body;
+		if(substr($full, -1) !== "\n"){
+			$full .= "\n";
+		}
+
+		$candidates = array(
+			FCPATH.'temp'.DIRECTORY_SEPARATOR.'pdf_preview_last_error.txt',
+			rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'jev_pdf_preview_last_error.txt',
+		);
+
+		foreach($candidates as $path){
+			$dir = dirname($path);
+			if(!is_dir($dir)){
+				@mkdir($dir, 0775, true);
+			}
+			if(@file_put_contents($path, $full, LOCK_EX) !== false){
+				return $path;
+			}
+		}
+		return false;
+	}
+
+	private function appendPdfPuppeteerJsDebugToDetail($detail){
+		$jsDebugLogPath = FCPATH.'temp'.DIRECTORY_SEPARATOR.'pdf_puppeteer_js_debug.log';
+		if(!is_file($jsDebugLogPath)){
+			return $detail;
+		}
+		$chunk = @file_get_contents($jsDebugLogPath);
+		if($chunk === false || $chunk === ''){
+			return $detail;
+		}
+		$max = 8192;
+		if(strlen($chunk) > $max){
+			$chunk = "...(truncated from start)...\n".substr($chunk, -$max);
+		}
+		$sep = ($detail !== '' && substr($detail, -1) !== "\n") ? "\n" : '';
+		return $detail.$sep."\n--- pdf_puppeteer_js_debug.log ---\n".$chunk;
+	}
+
+	private function failPdfPreviewCli($headline, $detail = ''){
+		$this->pdfPreviewLastFailureSummary = $headline;
+		$body = $headline;
+		if($detail !== ''){
+			$body .= "\n\n".$detail;
+		}
+		$written = $this->writePdfPreviewFailureTraceFile($body);
+		$logLine = 'PDF preview: '.$headline.($detail !== '' ? ' | '.str_replace("\n", ' ', substr($detail, 0, 500)) : '');
+		log_message('error', $logLine);
+		if(function_exists('error_log')){
+			@error_log($logLine);
+		}
+		if($written === false){
+			if(function_exists('error_log')){
+				@error_log('PDF preview: could not write trace file (check temp/ and sys temp permissions)');
+			}
+		}
+		return false;
+	}
+
+	private function getPreviewFormatFromRequest(){
+		$post = $this->input->post('preview_format');
+		if($post !== null && $post !== ''){
+			return strtolower(trim((string)$post));
+		}
+		$get = $this->input->get('preview_format');
+		if($get !== null && $get !== ''){
+			return strtolower(trim((string)$get));
+		}
+		return '';
+	}
+
+	private function extractHtmlBodyInner($html){
+		if(preg_match('~<body[^>]*>(.*)</body>~is', $html, $matches)){
+			return trim($matches[1]);
+		}
+		return trim($html);
+	}
+
+	private function extractHtmlStyleBlocks($html){
+		if(preg_match_all('~<style[^>]*>(.*?)</style>~is', $html, $matches)){
+			return "\n".implode("\n", $matches[1]);
+		}
+		return '';
+	}
+
+	private function resolvePdfPreviewNodeExecutable($configuredPath){
+		$this->config->load('pdf_preview');
+
+		$configuredPath = trim((string)$configuredPath);
+		if($configuredPath !== '' && $configuredPath !== 'node'){
+			if(@is_file($configuredPath) && @is_executable($configuredPath)){
+				return $configuredPath;
+			}
+			$msg = 'PDF preview: pdf_preview_node_path is missing or not executable: '.$configuredPath;
+			log_message('error', $msg);
+			error_log($msg);
+		}
+
+		$extraPaths = $this->config->item('pdf_preview_extra_node_paths');
+		if(is_array($extraPaths)){
+			foreach($extraPaths as $extraPath){
+				$extraPath = trim((string)$extraPath);
+				if($extraPath !== '' && @is_file($extraPath) && @is_executable($extraPath)){
+					return $extraPath;
+				}
+			}
+		}
+
+		$candidates = array('/opt/homebrew/bin/node', '/usr/local/bin/node', '/usr/bin/node');
+		foreach($candidates as $candidate){
+			if(@is_file($candidate) && @is_executable($candidate)){
+				return $candidate;
+			}
+		}
+
+		$autoNvm = $this->config->item('pdf_preview_autodetect_nvm_on_mac');
+		if($autoNvm !== false && $autoNvm !== '0' && DIRECTORY_SEPARATOR === '/'){
+			$isDarwin = (defined('PHP_OS') && stripos(PHP_OS, 'Darwin') !== false);
+			if($isDarwin){
+				$nvmMatches = glob('/Users/*/.nvm/versions/node/v*/bin/node', GLOB_NOSORT);
+				if(is_array($nvmMatches) && count($nvmMatches) > 0){
+					$bestPath = '';
+					$bestMtime = -1;
+					foreach($nvmMatches as $nvmNode){
+						if(@is_file($nvmNode) && @is_executable($nvmNode)){
+							$mtime = @filemtime($nvmNode);
+							if($mtime !== false && $mtime > $bestMtime){
+								$bestMtime = $mtime;
+								$bestPath = $nvmNode;
+							}
+						}
+					}
+					if($bestPath !== ''){
+						return $bestPath;
+					}
+				}
+			}
+		}
+
+		if(function_exists('shell_exec')){
+			$which = @shell_exec('command -v node 2>/dev/null');
+			if($which){
+				$which = trim($which);
+				if($which !== '' && @is_executable($which)){
+					return $which;
+				}
+			}
+		}
+
+		return $configuredPath !== '' ? $configuredPath : 'node';
+	}
+
+	private function mergePreviewSheetsHtmlForPdf($previewSheets){
+		$combinedStyles = '';
+		$blocks = '';
+		foreach($previewSheets as $sheet){
+			$combinedStyles .= $this->extractHtmlStyleBlocks($sheet['html']);
+			$body = $this->extractHtmlBodyInner($sheet['html']);
+			$name = htmlspecialchars($sheet['name'], ENT_QUOTES, 'UTF-8');
+			$blocks .= '<div class="preview-pdf-sheet"><h2 class="preview-pdf-sheet-title">'.$name.'</h2>'.$body.'</div>';
+		}
+
+		$globalCss = '
+			.preview-pdf-sheet { page-break-after: always; }
+			.preview-pdf-sheet:last-child { page-break-after: auto; }
+			html, body { margin: 0; padding: 0; }
+			table { border-collapse: collapse; width: auto !important; max-width: none !important; min-width: max-content !important; }
+			.preview-pdf-sheet-title { font-family: Arial, Helvetica, sans-serif; font-size: 14px; margin: 0 0 8px 0; }
+		';
+
+		return '<!DOCTYPE html><html><head><meta charset="utf-8"><style>'
+			.$globalCss.$combinedStyles
+			.'</style></head><body>'
+			.$blocks
+			.'</body></html>';
+	}
+
+	private function runPuppeteerPdfCli($mergedHtml){
+		$this->config->load('pdf_preview');
+		$this->pdfPreviewLastFailureSummary = '';
+
+		if(!$this->config->item('pdf_preview_enabled')){
+			return false;
+		}
+
+		$node = $this->resolvePdfPreviewNodeExecutable($this->config->item('pdf_preview_node_path'));
+		if($node !== 'node' && (!@is_file($node) || !@is_executable($node))){
+			return $this->failPdfPreviewCli(
+				'Node is not executable by the web server.',
+				'Resolved path: '.$node."\n".'Use pdf_preview_node_path (e.g. /opt/homebrew/bin/node) and ensure chmod +x and traverse permissions for the Apache/PHP user.'
+			);
+		}
+		$relativeScript = $this->config->item('pdf_preview_script_relative');
+		if(!$relativeScript){
+			return $this->failPdfPreviewCli('Config pdf_preview_script_relative is empty.');
+		}
+		$scriptPath = FCPATH.str_replace('/', DIRECTORY_SEPARATOR, $relativeScript);
+		if(!is_file($scriptPath)){
+			return $this->failPdfPreviewCli('render-pdf.js not found.', $scriptPath);
+		}
+
+		$projectPuppeteerCache = FCPATH.'tools'.DIRECTORY_SEPARATOR.'puppeteer-pdf'.DIRECTORY_SEPARATOR.'.puppeteer-cache';
+		if(!is_dir($projectPuppeteerCache)){
+			@mkdir($projectPuppeteerCache, 0775, true);
+		}
+		$chromeVendorDirs = glob($projectPuppeteerCache.DIRECTORY_SEPARATOR.'chrome'.DIRECTORY_SEPARATOR.'*', GLOB_ONLYDIR);
+		$hasChromeBundle = is_array($chromeVendorDirs) && count($chromeVendorDirs) > 0;
+		if(!$hasChromeBundle){
+			return $this->failPdfPreviewCli(
+				'Chromium is not installed for Puppeteer (project cache empty).',
+				"Run in terminal:\ncd tools/puppeteer-pdf\nnpm install\nnpm run install-chrome\n\nExpected folder:\n".$projectPuppeteerCache.DIRECTORY_SEPARATOR.'chrome'
+			);
+		}
+		if(!is_writable($projectPuppeteerCache)){
+			return $this->failPdfPreviewCli('Puppeteer cache directory is not writable by the web server.', $projectPuppeteerCache);
+		}
+
+		$timeout = (int)$this->config->item('pdf_preview_timeout_seconds');
+		if($timeout < 10){
+			$timeout = 10;
+		}
+		if($timeout > 600){
+			$timeout = 600;
+		}
+
+		$paper = $this->config->item('pdf_preview_paper_format');
+		if(!$paper){
+			$paper = 'A4';
+		}
+		$marginMm = (int)$this->config->item('pdf_preview_margin_mm');
+		if($marginMm < 0){
+			$marginMm = 12;
+		}
+
+		$tmpHtml = tempnam(sys_get_temp_dir(), 'jev_pdf_');
+		if($tmpHtml === false){
+			return $this->failPdfPreviewCli('tempnam() failed for HTML input.', 'sys_get_temp_dir()='.sys_get_temp_dir());
+		}
+		$tmpPdfBase = tempnam(sys_get_temp_dir(), 'jev_pdf_');
+		if($tmpPdfBase === false){
+			@unlink($tmpHtml);
+			return $this->failPdfPreviewCli('tempnam() failed for PDF output.', 'sys_get_temp_dir()='.sys_get_temp_dir());
+		}
+		@unlink($tmpPdfBase);
+		$tmpPdfPath = $tmpPdfBase.'.pdf';
+
+		if(@file_put_contents($tmpHtml, $mergedHtml) === false){
+			@unlink($tmpHtml);
+			return $this->failPdfPreviewCli('Could not write temp HTML for Puppeteer.', $tmpHtml);
+		}
+
+		$command = escapeshellarg($node).' '.escapeshellarg($scriptPath).' '.escapeshellarg($tmpHtml).' '.escapeshellarg($tmpPdfPath);
+		$descriptorSpec = array(
+			0 => array('pipe', 'r'),
+			1 => array('pipe', 'w'),
+			2 => array('pipe', 'w'),
+		);
+
+		$env = array();
+		foreach(array_merge($_SERVER, $_ENV) as $key => $value){
+			if(is_string($key) && is_string($value)){
+				$env[$key] = $value;
+			}
+		}
+		$env['PDF_PAPER_FORMAT'] = (string)$paper;
+		$env['PDF_MARGIN_MM'] = (string)$marginMm;
+
+		$launchTimeoutMs = (int)$this->config->item('pdf_preview_puppeteer_launch_timeout_ms');
+		if($launchTimeoutMs < 30000){
+			$launchTimeoutMs = 180000;
+		}
+		if($launchTimeoutMs > 600000){
+			$launchTimeoutMs = 600000;
+		}
+		$env['PUPPETEER_LAUNCH_TIMEOUT_MS'] = (string)$launchTimeoutMs;
+		$env['PUPPETEER_PROTOCOL_TIMEOUT_MS'] = (string)$launchTimeoutMs;
+
+		$pathPrefix = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin';
+		$existingPath = isset($env['PATH']) ? $env['PATH'] : '';
+		$env['PATH'] = $pathPrefix.(($existingPath !== '') ? PATH_SEPARATOR.$existingPath : '');
+
+		if($this->config->item('pdf_preview_chrome_no_sandbox')){
+			$env['PDF_PUPPETEER_NO_SANDBOX'] = '1';
+			$env['PUPPETEER_DANGEROUS_NO_SANDBOX'] = 'true';
+		}
+
+		if($this->config->item('pdf_preview_puppeteer_dumpio')){
+			$env['PDF_PUPPETEER_DUMPIO'] = '1';
+		}
+
+		if($this->config->item('pdf_preview_puppeteer_force_system_chrome')){
+			$env['PUPPETEER_FORCE_SYSTEM_CHROME'] = '1';
+		}
+
+		$puppeteerExe = trim((string)$this->config->item('pdf_preview_puppeteer_executable'));
+		if($puppeteerExe !== '' && @is_file($puppeteerExe)){
+			$env['PUPPETEER_EXECUTABLE_PATH'] = $puppeteerExe;
+		}
+
+		$env['PUPPETEER_CACHE_DIR'] = $projectPuppeteerCache;
+
+		$projectTempDir = FCPATH.'temp';
+		if(!is_dir($projectTempDir)){
+			@mkdir($projectTempDir, 0775, true);
+		}
+		if(is_dir($projectTempDir) && is_writable($projectTempDir)){
+			$env['TMPDIR'] = $projectTempDir;
+			$env['TMP'] = $projectTempDir;
+			$env['TEMP'] = $projectTempDir;
+		}
+		$jsDebugLogPath = $projectTempDir.DIRECTORY_SEPARATOR.'pdf_puppeteer_js_debug.log';
+		@file_put_contents($jsDebugLogPath, "\n=== ".date('c').' PDF render (PHP) ==='."\n", FILE_APPEND | LOCK_EX);
+		$env['PDF_RENDER_DEBUG_LOG'] = $jsDebugLogPath;
+
+		$puppetHome = FCPATH.'temp'.DIRECTORY_SEPARATOR.'.puppeteer_chrome_profile';
+		if(!is_dir($puppetHome)){
+			@mkdir($puppetHome, 0775, true);
+		}
+		if(is_dir($puppetHome) && is_writable($puppetHome)){
+			$env['HOME'] = $puppetHome;
+		}
+
+		if(function_exists('set_time_limit')){
+			$phpTimeBudget = $timeout + 120;
+			if($phpTimeBudget < 180){
+				$phpTimeBudget = 180;
+			}
+			@ini_set('max_execution_time', (string)$phpTimeBudget);
+			@set_time_limit($phpTimeBudget);
+		}
+
+		$puppeteerToolDir = FCPATH.'tools'.DIRECTORY_SEPARATOR.'puppeteer-pdf';
+		$process = @proc_open($command, $descriptorSpec, $pipes, is_dir($puppeteerToolDir) ? $puppeteerToolDir : null, $env, null);
+		if(!is_resource($process)){
+			@unlink($tmpHtml);
+			return $this->failPdfPreviewCli(
+				'proc_open() failed (Node/Puppeteer could not be started).',
+				'node='.$node."\n".'Check php.ini disable_functions, and that Node is executable by the web server user.'."\n".'Command: '.$command
+			);
+		}
+
+		fclose($pipes[0]);
+		stream_set_blocking($pipes[1], false);
+		stream_set_blocking($pipes[2], false);
+
+		$stderr = '';
+		$stdout = '';
+		$start = time();
+		$lastStatus = null;
+		while(true){
+			$lastStatus = proc_get_status($process);
+			if(!$lastStatus['running']){
+				break;
+			}
+			if((time() - $start) > $timeout){
+				proc_terminate($process);
+				$killWait = time();
+				while(proc_get_status($process)['running'] && (time() - $killWait) < 15){
+					usleep(100000);
+				}
+				$stdout .= (string)stream_get_contents($pipes[1]);
+				$stderr .= (string)stream_get_contents($pipes[2]);
+				@fclose($pipes[1]);
+				@fclose($pipes[2]);
+				@proc_close($process);
+				@unlink($tmpHtml);
+				@unlink($tmpPdfPath);
+				$detail = 'node='.$node."\n";
+				$outT = trim($stdout);
+				$errT = trim($stderr);
+				if($outT !== ''){
+					$detail .= "stdout:\n".(strlen($outT) > 1500 ? substr($outT, 0, 1500).'…' : $outT)."\n";
+				}
+				if($errT !== ''){
+					$detail .= "stderr:\n".(strlen($errT) > 1500 ? substr($errT, 0, 1500).'…' : $errT)."\n";
+				}
+				$detail = $this->appendPdfPuppeteerJsDebugToDetail($detail);
+				return $this->failPdfPreviewCli('Puppeteer CLI timed out after '.$timeout.' seconds.', $detail);
+			}
+			$stdout .= (string)stream_get_contents($pipes[1]);
+			$stderr .= (string)stream_get_contents($pipes[2]);
+			usleep(100000);
+		}
+
+		$stdout .= (string)stream_get_contents($pipes[1]);
+		$stderr .= (string)stream_get_contents($pipes[2]);
+		fclose($pipes[1]);
+		fclose($pipes[2]);
+		$exitFromStatus = ($lastStatus !== null && array_key_exists('exitcode', $lastStatus)) ? (int)$lastStatus['exitcode'] : -1;
+		$exitFromClose = proc_close($process);
+		$exitCode = ($exitFromStatus !== -1) ? $exitFromStatus : (int)$exitFromClose;
+
+		@unlink($tmpHtml);
+
+		if($exitCode !== 0){
+			$stdoutTrim = trim($stdout);
+			$stderrTrim = trim($stderr);
+			if(strlen($stdoutTrim) > 1500){
+				$stdoutTrim = substr($stdoutTrim, 0, 1500).'…';
+			}
+			if(strlen($stderrTrim) > 1500){
+				$stderrTrim = substr($stderrTrim, 0, 1500).'…';
+			}
+			$detail = 'node='.$node."\n";
+			if($stdoutTrim !== ''){
+				$detail .= "stdout:\n".$stdoutTrim."\n";
+			}
+			if($stderrTrim !== ''){
+				$detail .= "stderr:\n".$stderrTrim."\n";
+			}
+			if($exitCode === -1 && defined('PHP_OS') && stripos(PHP_OS, 'Darwin') !== false){
+				$detail .= "\n---\nExit -1: Chrome/Node was killed or PHP cut the request short. Try:\n"
+					."1) Raise max_execution_time in php.ini (e.g. 300+) for Apache.\n"
+					."2) Clear pdf_preview_puppeteer_executable (use bundled Chrome from npm run install-chrome).\n"
+					."3) Or keep system Chrome but ensure it matches your Puppeteer version.\n"
+					."4) Enable pdf_preview_puppeteer_dumpio in config and retry; check trace for Chrome logs.\n";
+			}
+			$detail = $this->appendPdfPuppeteerJsDebugToDetail($detail);
+			@unlink($tmpPdfPath);
+			return $this->failPdfPreviewCli('Puppeteer exited with code '.$exitCode.'.', $detail);
+		}
+
+		if(!is_file($tmpPdfPath) || filesize($tmpPdfPath) < 1){
+			@unlink($tmpPdfPath);
+			return $this->failPdfPreviewCli('PDF file missing or empty after Puppeteer.', 'node='.$node);
+		}
+
+		$pdfBinary = file_get_contents($tmpPdfPath);
+		@unlink($tmpPdfPath);
+		if($pdfBinary === false || $pdfBinary === ''){
+			return $this->failPdfPreviewCli('Could not read generated PDF from disk.', 'node='.$node);
+		}
+		return $pdfBinary;
+	}
+
 	private function respondWithSpreadsheetFile($excelFileName, $excelFilePath){
 		if($this->isPreviewRequest()){
 			$previewSpreadsheet = IOFactory::load($excelFilePath);
@@ -58,13 +496,49 @@ class Administrator extends CI_Controller {
 			}
 			delete_files($excelFilePath);
 
+			$wantPdf = $this->getPreviewFormatFromRequest() === 'pdf';
+			$pdfFallbackMessage = '';
+			if($wantPdf){
+				$this->config->load('pdf_preview');
+				if($this->config->item('pdf_preview_enabled')){
+					$mergedHtml = $this->mergePreviewSheetsHtmlForPdf($previewSheets);
+					$pdfBinary = $this->runPuppeteerPdfCli($mergedHtml);
+					if($pdfBinary !== false && $pdfBinary !== ''){
+						$pdfFileName = preg_replace('/\.xlsx$/i', '.pdf', $excelFileName);
+						if($pdfFileName === $excelFileName){
+							$pdfFileName = $excelFileName.'.pdf';
+						}
+						return $this->output
+							->set_content_type('application/json')
+							->set_output(json_encode(array(
+								'success' => true,
+								'fileName' => $pdfFileName,
+								'previewPdf' => base64_encode($pdfBinary),
+								'previewFormat' => 'pdf'
+							)));
+					}
+					$pdfFallbackMessage = 'PDF preview is unavailable; showing HTML preview.';
+				}
+			}
+
+			$payload = array(
+				'success' => true,
+				'fileName' => $excelFileName,
+				'previewSheets' => $previewSheets
+			);
+			if($pdfFallbackMessage !== ''){
+				$payload['pdfFallbackMessage'] = $pdfFallbackMessage;
+				$payload['pdfFailureTraceFiles'] = array(
+					FCPATH.'temp'.DIRECTORY_SEPARATOR.'pdf_preview_last_error.txt',
+					rtrim(sys_get_temp_dir(), DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR.'jev_pdf_preview_last_error.txt',
+				);
+				if($this->pdfPreviewLastFailureSummary !== ''){
+					$payload['pdfFailureSummary'] = $this->pdfPreviewLastFailureSummary;
+				}
+			}
 			return $this->output
 				->set_content_type('application/json')
-				->set_output(json_encode(array(
-					'success' => true,
-					'fileName' => $excelFileName,
-					'previewSheets' => $previewSheets
-				)));
+				->set_output(json_encode($payload));
 		}
 
 		$fileContents = file_get_contents($excelFilePath);

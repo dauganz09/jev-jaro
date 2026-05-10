@@ -54,6 +54,7 @@
 					<div class="col-md-12">
 						<button class="btn btn-primary" id="br_load_btn">Load / Save Period</button>
 						<button class="btn btn-outline-primary" id="br_preview_btn" disabled>Preview BRS</button>
+						<button class="btn btn-outline-secondary d-none report-preview-pdf-btn" id="br_preview_pdf_btn" disabled>Preview PDF</button>
 						<button class="btn btn-outline-success" id="br_export_btn" disabled>Download BRS</button>
 					</div>
 				</div>

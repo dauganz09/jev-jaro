@@ -143,7 +143,7 @@ $(document).ready(function () {
   }
 
   function setReconEnabled(on) {
-    $("#br_add_line_btn, #br_add_item_btn, #br_preview_btn, #br_export_btn").prop("disabled", !on);
+    $("#br_add_line_btn, #br_add_item_btn, #br_preview_btn, #br_preview_pdf_btn, #br_export_btn").prop("disabled", !on);
   }
 
   function clearReconTables() {
@@ -393,36 +393,92 @@ $(document).ready(function () {
     window.location = `${BASE_URL}brs?recon_id=${currentReconId}`;
   });
 
+  function applyBrPreviewLayoutFixes(iframe) {
+    if (!iframe || !iframe.contentWindow || !iframe.contentWindow.document) return;
+    var doc = iframe.contentWindow.document;
+    var style = doc.createElement("style");
+    style.type = "text/css";
+    style.textContent = [
+      "html, body { overflow: auto !important; width: auto !important; max-width: none !important; min-width: max-content !important; }",
+      "table { width: auto !important; min-width: max-content !important; max-width: none !important; }",
+    ].join("\n");
+    doc.head.appendChild(style);
+  }
+
+  function renderBankReconPreview(res, isPdfRequest) {
+    if (!res || res.success !== true) {
+      return Swal.fire({ title: "Preview failed", text: (res && res.message) || "No preview payload.", icon: "error" });
+    }
+
+    if (res.previewPdf) {
+      if (typeof window.renderSpreadsheetPdfPreview !== "function") {
+        return Swal.fire({ title: "Preview failed", text: "PDF preview is not available in this page load.", icon: "error" });
+      }
+      $("#preview_card").show();
+      var container = document.getElementById("preview_grid_container");
+      window.renderSpreadsheetPdfPreview({
+        container: container,
+        base64Pdf: res.previewPdf,
+        sheetSelector: "#preview_sheet_selector",
+        labelSelector: 'label[for="preview_sheet_selector"]',
+      });
+      return;
+    }
+
+    if (!res.previewSheets || !res.previewSheets.length) {
+      return Swal.fire({ title: "Preview failed", text: (res && res.message) || "No preview payload.", icon: "error" });
+    }
+
+    if (isPdfRequest && res.pdfFallbackMessage) {
+      if (typeof window.jevShowPdfFallbackNotice === "function") {
+        window.jevShowPdfFallbackNotice(res.pdfFallbackMessage, {
+          traceFiles: res.pdfFailureTraceFiles,
+          summary: res.pdfFailureSummary
+        });
+      } else {
+        Swal.fire({ icon: "info", title: "PDF preview", text: res.pdfFallbackMessage });
+      }
+    }
+
+    $("#preview_card").show();
+    var $sheetSelector = $("#preview_sheet_selector");
+    var $label = $('label[for="preview_sheet_selector"]');
+    var $container = $("#preview_grid_container");
+    if (typeof window.revokeSpreadsheetPdfPreview === "function") {
+      window.revokeSpreadsheetPdfPreview($container[0]);
+    }
+    $container.html('<iframe title="Excel Preview" style="border:0;background:#fff;width:100%;height:620px;" sandbox="allow-scripts allow-same-origin"></iframe>');
+    var iframe = $container.find("iframe")[0];
+
+    function writeHtml(html) {
+      if (!iframe || !iframe.contentWindow || !iframe.contentWindow.document) return;
+      iframe.contentWindow.document.open();
+      iframe.contentWindow.document.write(html);
+      iframe.contentWindow.document.close();
+      applyBrPreviewLayoutFixes(iframe);
+    }
+
+    $sheetSelector.empty();
+    res.previewSheets.forEach((s) => $sheetSelector.append($("<option>", { value: s.name, text: s.name })));
+    $label.show();
+    $sheetSelector.show();
+    $sheetSelector.off("change.brpreview").on("change.brpreview", function () {
+      var selected = res.previewSheets.find((s) => s.name === $(this).val());
+      if (selected) writeHtml(selected.html);
+    });
+
+    writeHtml(res.previewSheets[0].html);
+  }
+
   $(document).on("click", "#br_preview_btn", function () {
     $.get(`${BASE_URL}brs_preview`, { recon_id: currentReconId }, function (res) {
-      if (!res || res.success !== true || !res.previewSheets || !res.previewSheets.length) {
-        return Swal.fire({ title: "Preview failed", text: (res && res.message) || "No preview payload.", icon: "error" });
-      }
+      renderBankReconPreview(res, false);
+    });
+  });
 
-      $("#preview_card").show();
-      var $sheetSelector = $("#preview_sheet_selector");
-      var $label = $('label[for="preview_sheet_selector"]');
-      var $container = $("#preview_grid_container");
-      $container.html('<iframe title="Excel Preview" style="border:0;background:#fff;width:100%;height:620px;" sandbox="allow-same-origin"></iframe>');
-      var iframe = $container.find("iframe")[0];
-
-      function writeHtml(html) {
-        if (!iframe || !iframe.contentWindow || !iframe.contentWindow.document) return;
-        iframe.contentWindow.document.open();
-        iframe.contentWindow.document.write(html);
-        iframe.contentWindow.document.close();
-      }
-
-      $sheetSelector.empty();
-      res.previewSheets.forEach((s) => $sheetSelector.append($("<option>", { value: s.name, text: s.name })));
-      $label.show();
-      $sheetSelector.show();
-      $sheetSelector.off("change.brpreview").on("change.brpreview", function () {
-        var selected = res.previewSheets.find((s) => s.name === $(this).val());
-        if (selected) writeHtml(selected.html);
-      });
-
-      writeHtml(res.previewSheets[0].html);
+  $(document).on("click", "#br_preview_pdf_btn", function () {
+    $.get(`${BASE_URL}brs_preview`, { recon_id: currentReconId, preview_format: "pdf" }, function (res) {
+      renderBankReconPreview(res, true);
     });
   });
 

@@ -42,10 +42,23 @@
 	$this->uri->segment(1) == 'gl' ||
 	$this->uri->segment(1) == 'bank_recon'
 ): ?>
+<?php
+	$ci_pdf =& get_instance();
+	$ci_pdf->config->load('pdf_preview');
+	$pdf_preview_flag = (bool) $ci_pdf->config->item('pdf_preview_enabled');
+?>
+<script>window.__PDF_PREVIEW__ = { enabled: <?php echo $pdf_preview_flag ? 'true' : 'false'; ?> };</script>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@14.5.0/dist/handsontable.full.min.css">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/handsontable@14.5.0/dist/handsontable.full.min.js"></script>
 <script src="<?php echo base_url('assets'); ?>/js/spreadsheet-preview.js"></script>
+<script>
+$(function () {
+	if (window.__PDF_PREVIEW__ && window.__PDF_PREVIEW__.enabled) {
+		$(".report-preview-pdf-btn").removeClass("d-none");
+	}
+});
+</script>
 <?php endif; ?>
 <?php if($this->uri->segment(1) == 'dashboard' || $this->uri->segment(1) == 'jev'  || $this->uri->segment(1) == 'jevlist' || $this->uri->segment(1) == 'vbb_page'): ?>
 <script src="<?php echo base_url('assets'); ?>/js/scripts.js"></script>

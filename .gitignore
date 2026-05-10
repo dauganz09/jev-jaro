@@ -32,3 +32,5 @@ user_guide_src/cilexer/pycilexer.egg-info/*
 /tests/results/
 temp/*
 tmp/*
+tools/puppeteer-pdf/node_modules/
+tools/puppeteer-pdf/.puppeteer-cache/

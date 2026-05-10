@@ -46,6 +46,76 @@
     window.alert(message);
   }
 
+  function escapeHtmlPdfNotice(str) {
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function showPdfFallbackNotice(message, opts) {
+    opts = opts || {};
+    var html = escapeHtmlPdfNotice(message);
+    if (opts.summary) {
+      html += "<br><br><strong>Summary</strong><br>" + escapeHtmlPdfNotice(opts.summary);
+    }
+    if (opts.traceFiles && opts.traceFiles.length) {
+      html += "<br><br><strong>Trace files on this machine</strong><br><small>";
+      html += opts.traceFiles.map(function (f) { return escapeHtmlPdfNotice(f); }).join("<br>");
+      html += "</small>";
+    }
+    if (window.Swal) {
+      window.Swal.fire({
+        icon: "info",
+        title: "PDF preview",
+        html: html
+      });
+      return;
+    }
+
+    window.alert(message + (opts.summary ? "\n\n" + opts.summary : ""));
+  }
+
+  window.revokeSpreadsheetPdfPreview = function (containerElement) {
+    if (!containerElement || !containerElement.getAttribute) return;
+    var previousUrl = containerElement.getAttribute("data-pdf-blob-url");
+    if (previousUrl) {
+      window.URL.revokeObjectURL(previousUrl);
+      containerElement.removeAttribute("data-pdf-blob-url");
+    }
+  };
+
+  /**
+   * @param {object} opts
+   * @param {HTMLElement} opts.container
+   * @param {string} opts.base64Pdf
+   * @param {string} [opts.sheetSelector] — jQuery selector to empty/hide (e.g. #preview_sheet_selector)
+   * @param {string} [opts.labelSelector] — jQuery selector for sheet label
+   */
+  window.renderSpreadsheetPdfPreview = function (opts) {
+    if (!opts || !opts.container || !opts.base64Pdf) return;
+
+    window.revokeSpreadsheetPdfPreview(opts.container);
+
+    var buffer = base64ToArrayBuffer(opts.base64Pdf);
+    var bytes = new Uint8Array(buffer);
+    var blob = new Blob([bytes], { type: "application/pdf" });
+    var objectUrl = window.URL.createObjectURL(blob);
+    opts.container.setAttribute("data-pdf-blob-url", objectUrl);
+
+    opts.container.innerHTML =
+      '<iframe title="PDF Preview" src="' +
+      objectUrl +
+      '" style="border:0;width:100%;height:620px;background:#fff;"></iframe>';
+
+    if (opts.sheetSelector) {
+      $(opts.sheetSelector).empty().hide();
+    }
+    if (opts.labelSelector) {
+      $(opts.labelSelector).hide();
+    }
+  };
+
   window.initSpreadsheetPreview = function (config) {
     var hotInstance = null;
     var workbook = null;
@@ -54,10 +124,20 @@
     var $sheetSelector = $(config.sheetSelector);
     var $previewButton = $(config.buttonSelector);
     var containerElement = document.querySelector(config.containerSelector);
+    var previewFormat = config.previewFormat ? String(config.previewFormat) : "";
 
     if (!$form.length || !$previewButton.length || !containerElement) return;
     if ($previewButton.data("previewBound")) return;
     $previewButton.data("previewBound", true);
+
+    function prepareContainerForNewPreview() {
+      window.revokeSpreadsheetPdfPreview(containerElement);
+      if (hotInstance) {
+        hotInstance.destroy();
+        hotInstance = null;
+      }
+      workbook = null;
+    }
 
     function renderSheet(sheetName) {
       if (!workbook || !workbook.Sheets[sheetName]) return;
@@ -96,6 +176,7 @@
     }
 
     function renderWorkbookFromResponse(response) {
+      prepareContainerForNewPreview();
       var workbookBuffer = base64ToArrayBuffer(response.content);
       workbook = window.XLSX.read(workbookBuffer, { type: "array" });
       var sheetNames = workbook.SheetNames || [];
@@ -132,14 +213,14 @@
         "  overflow-y: auto !important;",
         "  width: auto !important;",
         "  max-width: none !important;",
-          "  min-width: max-content !important;",
+        "  min-width: max-content !important;",
         "}",
         "table, div, section, article {",
         "  max-width: none !important;",
         "}",
         "table {",
         "  width: auto !important;",
-          "  min-width: max-content !important;",
+        "  min-width: max-content !important;",
         "}",
         "img {",
         "  max-width: none !important;",
@@ -163,15 +244,12 @@
     }
 
     function renderHtmlPreview(previewHtml) {
-      if (hotInstance) {
-        hotInstance.destroy();
-        hotInstance = null;
-      }
+      prepareContainerForNewPreview();
 
       $sheetSelector.empty().hide();
       $('label[for="preview_sheet_selector"]').hide();
-      containerElement.innerHTML = '<iframe title="Excel Preview" style="border:0;background:#fff;" sandbox="allow-same-origin"></iframe>';
-      var iframe = containerElement.querySelector('iframe');
+      containerElement.innerHTML = '<iframe title="Excel Preview" style="border:0;background:#fff;" sandbox="allow-scripts allow-same-origin"></iframe>';
+      var iframe = containerElement.querySelector("iframe");
       if (iframe && iframe.contentWindow && iframe.contentWindow.document) {
         iframe.contentWindow.document.open();
         iframe.contentWindow.document.write(previewHtml);
@@ -187,13 +265,10 @@
         return;
       }
 
-      if (hotInstance) {
-        hotInstance.destroy();
-        hotInstance = null;
-      }
+      prepareContainerForNewPreview();
 
-      containerElement.innerHTML = '<iframe title="Excel Preview" style="border:0;background:#fff;" sandbox="allow-same-origin"></iframe>';
-      var iframe = containerElement.querySelector('iframe');
+      containerElement.innerHTML = '<iframe title="Excel Preview" style="border:0;background:#fff;" sandbox="allow-scripts allow-same-origin"></iframe>';
+      var iframe = containerElement.querySelector("iframe");
 
       function writeSheetHtml(sheetHtml) {
         if (!iframe || !iframe.contentWindow || !iframe.contentWindow.document) return;
@@ -222,21 +297,54 @@
       $previewCard.show();
     }
 
+    function renderPdfFromResponse(response) {
+      prepareContainerForNewPreview();
+      window.renderSpreadsheetPdfPreview({
+        container: containerElement,
+        base64Pdf: response.previewPdf,
+        sheetSelector: config.sheetSelector,
+        labelSelector: 'label[for="preview_sheet_selector"]'
+      });
+      $previewCard.show();
+    }
+
     $previewButton.on("click", function (event) {
       event.preventDefault();
+
+      var postData = $form.serialize();
+      if (previewFormat) {
+        postData += (postData.length ? "&" : "") + "preview_format=" + encodeURIComponent(previewFormat);
+      }
 
       $.ajax({
         url: config.previewUrl,
         method: "POST",
-        data: $form.serialize(),
+        data: postData,
         dataType: "json",
         success: function (response) {
+          if (response && response.success === true && response.previewPdf) {
+            renderPdfFromResponse(response);
+            return;
+          }
+
           if (response && response.success === true && response.previewSheets && response.previewSheets.length) {
+            if (response.pdfFallbackMessage && previewFormat === "pdf") {
+              showPdfFallbackNotice(response.pdfFallbackMessage, {
+                traceFiles: response.pdfFailureTraceFiles,
+                summary: response.pdfFailureSummary
+              });
+            }
             renderHtmlSheetsPreview(response.previewSheets);
             return;
           }
 
           if (response && response.success === true && response.previewHtml) {
+            if (response.pdfFallbackMessage && previewFormat === "pdf") {
+              showPdfFallbackNotice(response.pdfFallbackMessage, {
+                traceFiles: response.pdfFailureTraceFiles,
+                summary: response.pdfFailureSummary
+              });
+            }
             renderHtmlPreview(response.previewHtml);
             return;
           }
@@ -247,6 +355,12 @@
             return;
           }
 
+          if (response.pdfFallbackMessage && previewFormat === "pdf") {
+            showPdfFallbackNotice(response.pdfFallbackMessage, {
+              traceFiles: response.pdfFailureTraceFiles,
+              summary: response.pdfFailureSummary
+            });
+          }
           renderWorkbookFromResponse(response);
         },
         error: function (xhr) {
@@ -266,6 +380,8 @@
       });
     });
   };
+
+  window.jevShowPdfFallbackNotice = showPdfFallbackNotice;
 
   $(function () {
     var $previewButton = $("#preview_report_btn");

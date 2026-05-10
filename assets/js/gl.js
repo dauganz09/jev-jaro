@@ -514,6 +514,15 @@ $('#tb_quarter').change(function(){
       containerSelector: "#preview_grid_container",
       previewUrl: $("#preview_report_btn").data("previewUrl")
     });
+    initSpreadsheetPreview({
+      formSelector: "#report_form",
+      buttonSelector: "#preview_pdf_btn",
+      previewCardSelector: "#preview_card",
+      sheetSelector: "#preview_sheet_selector",
+      containerSelector: "#preview_grid_container",
+      previewUrl: $("#preview_pdf_btn").data("previewUrl"),
+      previewFormat: "pdf"
+    });
   }
 
 })
