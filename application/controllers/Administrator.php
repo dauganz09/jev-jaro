@@ -11,6 +11,7 @@ use PhpOffice\PhpSpreadsheet\Cell\Coordinate;
 class Administrator extends CI_Controller {
 	private $previewMode = false;
 	private $subsidiaryTable = 'tbl_subsidiaries';
+	private $bankAccountsTable = 'tbl_bank_accounts';
 
 	private function enablePreviewMode(){
 		$this->previewMode = true;
@@ -86,6 +87,132 @@ class Administrator extends CI_Controller {
 
 	private function hasSubsidiaryMaster(){
 		return $this->db->table_exists($this->subsidiaryTable);
+	}
+
+	private function hasBankReconTables(){
+		return $this->db->table_exists($this->bankAccountsTable) && $this->db->table_exists('tbl_bank_recon');
+	}
+
+	private function respondJson($payload){
+		return $this->output
+			->set_content_type('application/json')
+			->set_output(json_encode($payload));
+	}
+
+	private function parseMoney($value){
+		$value = trim((string)$value);
+		if($value === '') return 0.0;
+		$value = str_replace(array(',', ' '), '', $value);
+		return (float)$value;
+	}
+
+	private function buildPeriodDates($year, $month){
+		$year = (int)$year;
+		$month = (int)$month;
+		if($month < 1) $month = 1;
+		if($month > 12) $month = 12;
+		$start = sprintf('%04d-%02d-01', $year, $month);
+		$end = date('Y-m-t', strtotime($start));
+		return array($start, $end);
+	}
+
+	private function loadBrsFormConfig(){
+		$this->config->load('brs_form', true);
+		$cfg = $this->config->item('brs_form');
+		return is_array($cfg) ? $cfg : array();
+	}
+
+	private function brsSumItemsByType($items){
+		$typeSum = array();
+		foreach($items as $it){
+			$t = (string)$it['item_type'];
+			if(!isset($typeSum[$t])) $typeSum[$t] = 0.0;
+			$typeSum[$t] += (float)$it['amount'];
+		}
+		return $typeSum;
+	}
+
+	private function getBankAccount($bankAccountId, $brgyId){
+		$this->db->where('bank_account_id', (int)$bankAccountId);
+		$this->db->where('brgy_id', (int)$brgyId);
+		return $this->db->get($this->bankAccountsTable)->row_array();
+	}
+
+	private function getOrCreateRecon($brgyId, $bankAccountId, $year, $month){
+		$this->db->where('brgy_id', (int)$brgyId);
+		$this->db->where('bank_account_id', (int)$bankAccountId);
+		$this->db->where('period_year', (int)$year);
+		$this->db->where('period_month', (int)$month);
+		$row = $this->db->get('tbl_bank_recon')->row_array();
+		if($row) return $row;
+
+		$insert = array(
+			'brgy_id' => (int)$brgyId,
+			'bank_account_id' => (int)$bankAccountId,
+			'period_year' => (int)$year,
+			'period_month' => (int)$month,
+			'statement_ending_balance' => 0,
+			'book_ending_balance' => 0,
+			'status' => 'draft'
+		);
+		$this->db->insert('tbl_bank_recon', $insert);
+		$insert['recon_id'] = $this->db->insert_id();
+		return $insert;
+	}
+
+	private function computeBookEndingBalance($brgyId, $bankAccountRow, $periodEnd){
+		$cashCode = isset($bankAccountRow['cash_in_bank_acc_code']) && trim((string)$bankAccountRow['cash_in_bank_acc_code']) !== ''
+			? trim((string)$bankAccountRow['cash_in_bank_acc_code'])
+			: '10102020';
+
+		$this->db->select('SUM(jd.debit) AS debit_sum, SUM(jd.credit) AS credit_sum', false);
+		$this->db->from('tbl_jevdata jd');
+		$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no');
+		$this->db->where('j.brgy', (int)$brgyId);
+		$this->db->where('j.jev_date <=', $periodEnd);
+		$this->db->where('jd.acc_code', $cashCode);
+		$this->db->group_start();
+		$this->db->where('j.bank_account_id', (int)$bankAccountRow['bank_account_id']);
+		$this->db->or_where('j.bank_account_id IS NULL', null, false);
+		$this->db->group_end();
+		$row = $this->db->get()->row_array();
+		$debit = (float)($row['debit_sum'] ?? 0);
+		$credit = (float)($row['credit_sum'] ?? 0);
+		return $debit - $credit;
+	}
+
+	private function listBookLinesForPeriod($brgyId, $bankAccountRow, $periodStart, $periodEnd){
+		$cashCode = isset($bankAccountRow['cash_in_bank_acc_code']) && trim((string)$bankAccountRow['cash_in_bank_acc_code']) !== ''
+			? trim((string)$bankAccountRow['cash_in_bank_acc_code'])
+			: '10102020';
+
+		$this->db->select('j.jev_date, j.jev_no, j.type, j.payor_payee, jd.jevdata_id, jd.or_num, jd.dv_no, jd.check_no, jd.check_date, jd.bank_acct, jd.debit, jd.credit');
+		$this->db->from('tbl_jevdata jd');
+		$this->db->join('tbl_jev j', 'jd.jev_id = j.jev_id AND jd.jev_no = j.jev_no');
+		$this->db->where('j.brgy', (int)$brgyId);
+		$this->db->where('j.jev_date >=', $periodStart);
+		$this->db->where('j.jev_date <=', $periodEnd);
+		$this->db->where('jd.acc_code', $cashCode);
+		$this->db->order_by('j.jev_date', 'ASC');
+		$this->db->order_by('j.jev_no', 'ASC');
+		$rows = $this->db->get()->result_array();
+
+		return array_map(function($r){
+			$ref = '';
+			if(!empty($r['or_num'])) $ref = 'OR: '.$r['or_num'];
+			if(!empty($r['dv_no'])) $ref = ($ref !== '' ? ' | ' : '').'DV: '.$r['dv_no'];
+			if(!empty($r['check_no'])) $ref = ($ref !== '' ? ' | ' : '').'Chk: '.$r['check_no'];
+			if(!empty($r['bank_acct'])) $ref = ($ref !== '' ? ' | ' : '').'Bank: '.$r['bank_acct'];
+			$net = (float)$r['debit'] - (float)$r['credit'];
+			return array(
+				'jevdata_id' => (int)$r['jevdata_id'],
+				'jev_date' => $r['jev_date'],
+				'jev_no' => $r['jev_no'],
+				'ref' => $ref,
+				'book_net' => $net,
+				'net' => $net
+			);
+		}, $rows);
 	}
 
 	public function getsubsidiaries(){
@@ -468,11 +595,111 @@ class Administrator extends CI_Controller {
 	}
 
 	public function getaccounts(){
-		$this->db->order_by('account_id','asc');
+		$this->db->order_by('code','asc');
+		if($this->db->field_exists('is_active', 'tbl_accounts')){
+			$this->db->where('is_active', 1);
+		}
 		$res = $this->db->get('tbl_accounts');
 		$this->output
 		->set_content_type('application/json')
 		->set_output(json_encode($res->result_array()));
+	}
+
+	public function chart_of_accounts_page(){
+		$data['alink'] = 'COA';
+		$data['title'] = 'Chart of Accounts';
+		// Merge into main config (do not use use_sections=TRUE — that nests under 'coa_accounts' and breaks item() lookups)
+		$this->load->config('coa_accounts', false);
+		$data['coa_classes'] = $this->config->item('coa_account_classes');
+		if(!is_array($data['coa_classes'])){
+			$data['coa_classes'] = array();
+		}
+		$data['coa_code_hint'] = $this->config->item('coa_code_hint');
+		$this->load->view('templates/header.php',$data);
+		$this->load->view('templates/sidebar.php',$data);
+		$this->load->view('admin/chart_of_accounts',$data);
+		$this->load->view('templates/footer.php',$data);
+	}
+
+	public function api_coa_accounts(){
+		if(!$this->db->table_exists('tbl_accounts')){
+			return $this->respondJson(array('success'=>false,'message'=>'tbl_accounts missing.'));
+		}
+		$this->db->order_by('code','asc');
+		$rows = $this->db->get('tbl_accounts')->result_array();
+		return $this->respondJson(array('success'=>true,'accounts'=>$rows));
+	}
+
+	public function api_coa_account_save(){
+		if(!$this->db->table_exists('tbl_accounts')){
+			return $this->respondJson(array('success'=>false,'message'=>'tbl_accounts missing.'));
+		}
+		$id = (int)$this->input->post('account_id');
+		$code = preg_replace('/\s+/','',trim((string)$this->input->post('code')));
+		$name = trim((string)$this->input->post('name'));
+		$accountClass = trim((string)$this->input->post('account_class'));
+		$notes = trim((string)$this->input->post('notes'));
+		$isActive = (int)$this->input->post('is_active') ? 1 : 0;
+
+		if($code === '' || $name === ''){
+			return $this->respondJson(array('success'=>false,'message'=>'Account code and title are required.'));
+		}
+		if(strlen($code) > 40){
+			return $this->respondJson(array('success'=>false,'message'=>'Account code is too long.'));
+		}
+
+		$this->db->where('code', $code);
+		if($id > 0){
+			$this->db->where('account_id !=', $id);
+		}
+		$dup = $this->db->count_all_results('tbl_accounts');
+		if($dup > 0){
+			return $this->respondJson(array('success'=>false,'message'=>'That account code already exists.'));
+		}
+
+		$data = array(
+			'code' => $code,
+			'name' => $name,
+		);
+		if($this->db->field_exists('account_class', 'tbl_accounts')){
+			$data['account_class'] = $accountClass !== '' ? $accountClass : null;
+		}
+		if($this->db->field_exists('notes', 'tbl_accounts')){
+			$data['notes'] = $notes !== '' ? $notes : null;
+		}
+		if($this->db->field_exists('is_active', 'tbl_accounts')){
+			$data['is_active'] = $isActive;
+		}
+
+		if($id > 0){
+			$this->db->where('account_id', $id);
+			$this->db->update('tbl_accounts', $data);
+			return $this->respondJson(array('success'=>true));
+		}
+		$this->db->insert('tbl_accounts', $data);
+		return $this->respondJson(array('success'=>true,'account_id'=>$this->db->insert_id()));
+	}
+
+	public function api_coa_account_delete(){
+		if(!$this->db->table_exists('tbl_accounts')){
+			return $this->respondJson(array('success'=>false,'message'=>'tbl_accounts missing.'));
+		}
+		$id = (int)$this->input->post('account_id');
+		$row = $this->db->where('account_id', $id)->get('tbl_accounts')->row_array();
+		if(!$row){
+			return $this->respondJson(array('success'=>false,'message'=>'Account not found.'));
+		}
+		$code = trim((string)$row['code']);
+		$this->db->where('acc_code', $code);
+		$n = $this->db->count_all_results('tbl_jevdata');
+		if($n > 0){
+			return $this->respondJson(array(
+				'success'=>false,
+				'message'=>'This account is used on '.$n.' JEV line(s). Deactivate it instead of deleting.',
+			));
+		}
+		$this->db->where('account_id', $id)->delete('tbl_accounts');
+		return $this->respondJson(array('success'=>true));
 	}
 
 	public function getjevlist($id){
@@ -715,6 +942,658 @@ if (!empty($result)) {
 		$this->load->view('templates/sidebar.php',$data);
 		$this->load->view('admin/respondents');
 		$this->load->view('templates/footer.php');
+	}
+
+	// ----------------------------
+	// Bank reconciliation pages
+	// ----------------------------
+
+	public function bank_accounts_page(){
+		$data['alink'] = "BANKACCTS";
+		$data['title'] = "Bank Accounts";
+		$this->load->view('templates/header.php',$data);
+		$this->load->view('templates/sidebar.php',$data);
+		$this->load->view('admin/bank_accounts',$data);
+		$this->load->view('templates/footer.php');
+	}
+
+	public function bank_recon_page(){
+		$data['alink'] = "BANKRECON";
+		$data['title'] = "Bank Reconciliation";
+		$this->load->view('templates/header.php',$data);
+		$this->load->view('templates/sidebar.php',$data);
+		$this->load->view('admin/bank_recon',$data);
+		$this->load->view('templates/footer.php');
+	}
+
+	// ----------------------------
+	// Bank reconciliation APIs
+	// ----------------------------
+
+	public function api_bank_accounts(){
+		$brgyId = $this->getSelectedBrgyId();
+		if(!$this->db->table_exists($this->bankAccountsTable)){
+			return $this->respondJson(array());
+		}
+		$this->db->where('brgy_id', $brgyId);
+		$this->db->order_by('is_active','DESC');
+		$this->db->order_by('bank_name','ASC');
+		$rows = $this->db->get($this->bankAccountsTable)->result_array();
+		return $this->respondJson($rows);
+	}
+
+	public function api_bank_account_save(){
+		$brgyId = $this->getSelectedBrgyId();
+		if(!$this->db->table_exists($this->bankAccountsTable)){
+			return $this->respondJson(array('success'=>false,'message'=>'Apply bank_recon_migration.sql first.'));
+		}
+		$id = (int)$this->input->post('bank_account_id');
+		$bankName = trim((string)$this->input->post('bank_name'));
+		$branch = trim((string)$this->input->post('branch'));
+		$accountNo = trim((string)$this->input->post('account_no'));
+		$accountName = trim((string)$this->input->post('account_name'));
+		$cashCode = trim((string)$this->input->post('cash_in_bank_acc_code'));
+		if($cashCode === '') $cashCode = '10102020';
+		if($bankName === '' || $accountNo === '' || $accountName === ''){
+			return $this->respondJson(array('success'=>false,'message'=>'Bank name, account no, and account name are required.'));
+		}
+		$data = array(
+			'brgy_id' => $brgyId,
+			'bank_name' => $bankName,
+			'branch' => $branch,
+			'account_no' => $accountNo,
+			'account_name' => $accountName,
+			'cash_in_bank_acc_code' => $cashCode,
+		);
+		if($id > 0){
+			$this->db->where('bank_account_id', $id);
+			$this->db->where('brgy_id', $brgyId);
+			$this->db->update($this->bankAccountsTable, $data);
+			return $this->respondJson(array('success'=>true));
+		}
+		$data['is_active'] = 1;
+		$this->db->insert($this->bankAccountsTable, $data);
+		return $this->respondJson(array('success'=>true,'bank_account_id'=>$this->db->insert_id()));
+	}
+
+	public function api_bank_account_toggle(){
+		$brgyId = $this->getSelectedBrgyId();
+		$id = (int)$this->input->post('bank_account_id');
+		$isActive = (int)$this->input->post('is_active') ? 1 : 0;
+		$this->db->where('bank_account_id', $id);
+		$this->db->where('brgy_id', $brgyId);
+		$this->db->update($this->bankAccountsTable, array('is_active'=>$isActive));
+		return $this->respondJson(array('success'=>true));
+	}
+
+	public function api_bank_recon_upsert(){
+		$brgyId = $this->getSelectedBrgyId();
+		if(!$this->hasBankReconTables()){
+			return $this->respondJson(array('success'=>false,'message'=>'Apply bank_recon_migration.sql first.'));
+		}
+		$bankAccountId = (int)$this->input->post('bank_account_id');
+		$year = (int)$this->input->post('year');
+		$month = (int)$this->input->post('month');
+		$statementEnding = $this->parseMoney($this->input->post('statement_ending_balance'));
+		$bank = $this->getBankAccount($bankAccountId, $brgyId);
+		if(!$bank){
+			return $this->respondJson(array('success'=>false,'message'=>'Invalid bank account.'));
+		}
+		$recon = $this->getOrCreateRecon($brgyId, $bankAccountId, $year, $month);
+		list($_ps, $_pe) = $this->buildPeriodDates($year, $month);
+		$bookEnding = $this->computeBookEndingBalance($brgyId, $bank, $_pe);
+		$stmtAsOfIn = trim((string)$this->input->post('statement_as_of_date'));
+		$explanatory = (string)$this->input->post('explanatory_comment');
+		$stmtAsOfDate = $_pe;
+		if($stmtAsOfIn !== ''){
+			$ts = strtotime($stmtAsOfIn);
+			if($ts !== false){
+				$stmtAsOfDate = date('Y-m-d', $ts);
+			}
+		}
+		$this->db->where('recon_id', (int)$recon['recon_id']);
+		$this->db->update('tbl_bank_recon', array(
+			'statement_ending_balance' => $statementEnding,
+			'book_ending_balance' => $bookEnding,
+			'date_updated' => date('Y-m-d H:i:s'),
+			'statement_as_of_date' => $stmtAsOfDate,
+			'explanatory_comment' => $explanatory,
+		));
+		return $this->respondJson(array(
+			'success' => true,
+			'recon_id' => (int)$recon['recon_id'],
+			'statement_ending_balance' => (string)$statementEnding,
+			'book_ending_balance' => (string)$bookEnding,
+			'statement_as_of_date' => $stmtAsOfDate,
+			'explanatory_comment' => $explanatory,
+		));
+	}
+
+	public function api_bank_recon_get(){
+		$brgyId = $this->getSelectedBrgyId();
+		if(!$this->hasBankReconTables()){
+			return $this->respondJson(array('success'=>false,'message'=>'Apply bank_recon_migration.sql first.'));
+		}
+		$bankAccountId = (int)$this->input->get('bank_account_id');
+		$year = (int)$this->input->get('year');
+		$month = (int)$this->input->get('month');
+		$bank = $this->getBankAccount($bankAccountId, $brgyId);
+		if(!$bank){
+			return $this->respondJson(array('success'=>false,'message'=>'Invalid bank account.'));
+		}
+		list($_ps, $_pe) = $this->buildPeriodDates($year, $month);
+		$bookEndingFresh = $this->computeBookEndingBalance($brgyId, $bank, $_pe);
+		$this->db->where('brgy_id', (int)$brgyId);
+		$this->db->where('bank_account_id', (int)$bankAccountId);
+		$this->db->where('period_year', (int)$year);
+		$this->db->where('period_month', (int)$month);
+		$recon = $this->db->get('tbl_bank_recon')->row_array();
+		if(!$recon){
+			return $this->respondJson(array(
+				'success' => true,
+				'recon_id' => null,
+				'statement_ending_balance' => '',
+				'book_ending_balance' => (string)$bookEndingFresh,
+				'statement_as_of_date' => $_pe,
+				'explanatory_comment' => '',
+			));
+		}
+		return $this->respondJson(array(
+			'success' => true,
+			'recon_id' => (int)$recon['recon_id'],
+			'statement_ending_balance' => (string)$recon['statement_ending_balance'],
+			'book_ending_balance' => (string)$bookEndingFresh,
+			'statement_as_of_date' => !empty($recon['statement_as_of_date']) ? $recon['statement_as_of_date'] : $_pe,
+			'explanatory_comment' => isset($recon['explanatory_comment']) ? (string)$recon['explanatory_comment'] : '',
+		));
+	}
+
+	public function api_bank_recon_lines(){
+		$reconId = (int)$this->input->get('recon_id');
+		$this->db->where('recon_id', $reconId);
+		$lines = $this->db->get('tbl_bank_statement_lines')->result_array();
+		// matches with joined info
+		$sql = "SELECT m.match_id, m.matched_amount,
+			sl.txn_date, sl.description, sl.amount AS stmt_amount,
+			j.jev_date, j.jev_no,
+			(jd.debit - jd.credit) AS book_net,
+			CONCAT(IFNULL(jd.or_num,''), IF(jd.dv_no IS NULL OR jd.dv_no='', '', CONCAT(' DV:', jd.dv_no)), IF(jd.check_no IS NULL OR jd.check_no='', '', CONCAT(' Chk:', jd.check_no))) AS ref
+		FROM tbl_bank_recon_matches m
+		INNER JOIN tbl_bank_statement_lines sl ON sl.statement_line_id = m.statement_line_id
+		INNER JOIN tbl_jevdata jd ON jd.jevdata_id = m.jevdata_id
+		INNER JOIN tbl_jev j ON j.jev_id = jd.jev_id AND j.jev_no = jd.jev_no
+		WHERE m.recon_id = ?";
+		$matches = $this->db->query($sql, array($reconId))->result_array();
+		return $this->respondJson(array('success'=>true,'lines'=>$lines,'matches'=>$matches));
+	}
+
+	public function api_bank_recon_line_add(){
+		$reconId = (int)$this->input->post('recon_id');
+		$txnDate = (string)$this->input->post('txn_date');
+		$desc = trim((string)$this->input->post('description'));
+		$ref = trim((string)$this->input->post('reference'));
+		$amt = $this->parseMoney($this->input->post('amount'));
+		if($txnDate === '' || $desc === ''){
+			return $this->respondJson(array('success'=>false,'message'=>'Date and description required.'));
+		}
+		$this->db->insert('tbl_bank_statement_lines', array(
+			'recon_id' => $reconId,
+			'txn_date' => $txnDate,
+			'description' => $desc,
+			'reference' => $ref,
+			'amount' => $amt
+		));
+		return $this->respondJson(array('success'=>true));
+	}
+
+	public function api_bank_recon_line_delete(){
+		$id = (int)$this->input->post('statement_line_id');
+		$this->db->where('statement_line_id', $id)->delete('tbl_bank_statement_lines');
+		$this->db->where('statement_line_id', $id)->delete('tbl_bank_recon_matches');
+		return $this->respondJson(array('success'=>true));
+	}
+
+	public function api_bank_recon_items(){
+		$reconId = (int)$this->input->get('recon_id');
+		$this->db->where('recon_id', $reconId);
+		$this->db->order_by('recon_item_id','DESC');
+		$items = $this->db->get('tbl_bank_recon_items')->result_array();
+		return $this->respondJson(array('success'=>true,'items'=>$items));
+	}
+
+	public function api_bank_recon_item_add(){
+		$reconId = (int)$this->input->post('recon_id');
+		$type = trim((string)$this->input->post('item_type'));
+		$amt = $this->parseMoney($this->input->post('amount'));
+		$ref = trim((string)$this->input->post('reference'));
+		$notes = trim((string)$this->input->post('notes'));
+		if($type === ''){
+			return $this->respondJson(array('success'=>false,'message'=>'Item type required.'));
+		}
+		$this->db->insert('tbl_bank_recon_items', array(
+			'recon_id'=>$reconId,
+			'item_type'=>$type,
+			'amount'=>$amt,
+			'reference'=>$ref,
+			'notes'=>$notes
+		));
+		return $this->respondJson(array('success'=>true));
+	}
+
+	public function api_bank_recon_item_delete(){
+		$id = (int)$this->input->post('recon_item_id');
+		$this->db->where('recon_item_id', $id)->delete('tbl_bank_recon_items');
+		return $this->respondJson(array('success'=>true));
+	}
+
+	public function api_bank_recon_item_create_jev(){
+		$brgyId = $this->getSelectedBrgyId();
+		$itemId = (int)$this->input->post('recon_item_id');
+		$item = $this->db->where('recon_item_id', $itemId)->get('tbl_bank_recon_items')->row_array();
+		if(!$item){
+			return $this->respondJson(array('success'=>false,'message'=>'Recon item not found.'));
+		}
+		if(!empty($item['linked_jev_id'])){
+			return $this->respondJson(array('success'=>false,'message'=>'Item already linked to a JEV.'));
+		}
+
+		$recon = $this->db->where('recon_id', (int)$item['recon_id'])->get('tbl_bank_recon')->row_array();
+		if(!$recon){
+			return $this->respondJson(array('success'=>false,'message'=>'Recon header not found.'));
+		}
+		$bank = $this->getBankAccount($recon['bank_account_id'], $brgyId);
+		if(!$bank){
+			return $this->respondJson(array('success'=>false,'message'=>'Bank account not found.'));
+		}
+		$cashCode = trim((string)($bank['cash_in_bank_acc_code'] ?? '10102020'));
+		if($cashCode === '') $cashCode = '10102020';
+
+		// Build a simple 2-line GJ entry. This is a DRAFT helper; accountant can adjust titles/codes.
+		$amount = (float)$item['amount'];
+		if($amount == 0){
+			return $this->respondJson(array('success'=>false,'message'=>'Amount must be non-zero.'));
+		}
+		$absAmt = abs($amount);
+
+		// Derive date from period end
+		list($_ps, $_pe) = $this->buildPeriodDates($recon['period_year'], $recon['period_month']);
+
+		$jevNo = 'BRS-' . date('YmdHis');
+		$jevData = array(
+			'jev_no' => $jevNo,
+			'jev_date' => $_pe,
+			'fund' => '',
+			'bank_account_id' => (int)$bank['bank_account_id'],
+			'payor_payee' => 'BANK',
+			'particulars' => 'Bank reconciliation adjustment: '.$item['item_type'].' '.$this->journalCoalesceField($item['reference'], ''),
+			'resp_center' => '',
+			'type' => 'GJ',
+			'brgy' => $brgyId,
+			'status' => 0
+		);
+
+		$this->db->trans_begin();
+		$this->db->insert('tbl_jev', $jevData);
+		$jevId = $this->db->insert_id();
+
+		// Very simple placeholder COA codes for expenses/income; user can edit later.
+		$counterAccCode = '99999999';
+		$counterTitle = '';
+		$cashTitle = 'Cash in Bank';
+		$cashDebit = 0; $cashCredit = 0;
+		$ctrDebit = 0; $ctrCredit = 0;
+
+		if($item['item_type'] === 'bank_charge' || $item['item_type'] === 'bank_debit_memo'){
+			// Bank charges / debit memo reduce cash
+			$cashCredit = $absAmt;
+			$ctrDebit = $absAmt;
+			$counterTitle = 'Bank Charges / Adjustment';
+		}elseif($item['item_type'] === 'interest_income' || $item['item_type'] === 'bank_credit_memo'){
+			// Interest / credit memo increase cash
+			$cashDebit = $absAmt;
+			$ctrCredit = $absAmt;
+			$counterTitle = 'Interest Income / Adjustment';
+		}else{
+			$this->db->trans_rollback();
+			return $this->respondJson(array('success'=>false,'message'=>'Item type not supported for auto JEV.'));
+		}
+
+		$this->db->insert('tbl_jevdata', array(
+			'jev_id' => $jevId,
+			'jev_no' => $jevNo,
+			'acc_title' => $cashTitle,
+			'acc_code' => $cashCode,
+			'debit' => $cashDebit,
+			'credit' => $cashCredit,
+			'bank_acct' => $bank['account_no'],
+			'bank_account_id' => (int)$bank['bank_account_id'],
+		));
+		$this->db->insert('tbl_jevdata', array(
+			'jev_id' => $jevId,
+			'jev_no' => $jevNo,
+			'acc_title' => $counterTitle,
+			'acc_code' => $counterAccCode,
+			'debit' => $ctrDebit,
+			'credit' => $ctrCredit,
+			'bank_acct' => $bank['account_no'],
+			'bank_account_id' => (int)$bank['bank_account_id'],
+		));
+
+		$this->db->where('recon_item_id', $itemId);
+		$this->db->update('tbl_bank_recon_items', array('linked_jev_id'=>$jevId));
+
+		if($this->db->trans_status() === FALSE){
+			$this->db->trans_rollback();
+			return $this->respondJson(array('success'=>false,'message'=>'Failed creating JEV.'));
+		}
+		$this->db->trans_commit();
+		return $this->respondJson(array('success'=>true,'jev_id'=>$jevId,'jev_no'=>$jevNo));
+	}
+
+	public function api_bank_recon_book_lines(){
+		$brgyId = $this->getSelectedBrgyId();
+		$reconId = (int)$this->input->get('recon_id');
+		$recon = $this->db->where('recon_id', $reconId)->get('tbl_bank_recon')->row_array();
+		if(!$recon){
+			return $this->respondJson(array('success'=>false,'message'=>'Recon not found.'));
+		}
+		$bank = $this->getBankAccount($recon['bank_account_id'], $brgyId);
+		list($ps, $pe) = $this->buildPeriodDates($recon['period_year'], $recon['period_month']);
+		$lines = $this->listBookLinesForPeriod($brgyId, $bank, $ps, $pe);
+		$bookEnding = $this->computeBookEndingBalance($brgyId, $bank, $pe);
+		return $this->respondJson(array('success'=>true,'lines'=>$lines,'book_ending_balance'=>$bookEnding));
+	}
+
+	public function api_bank_recon_suggest(){
+		$brgyId = $this->getSelectedBrgyId();
+		$reconId = (int)$this->input->get('recon_id');
+		$stmtLineId = (int)$this->input->get('statement_line_id');
+		$recon = $this->db->where('recon_id', $reconId)->get('tbl_bank_recon')->row_array();
+		$stmt = $this->db->where('statement_line_id', $stmtLineId)->get('tbl_bank_statement_lines')->row_array();
+		if(!$recon || !$stmt){
+			return $this->respondJson(array('success'=>false,'message'=>'Missing recon or statement line.'));
+		}
+		$bank = $this->getBankAccount($recon['bank_account_id'], $brgyId);
+		list($ps, $pe) = $this->buildPeriodDates($recon['period_year'], $recon['period_month']);
+		$bookLines = $this->listBookLinesForPeriod($brgyId, $bank, $ps, $pe);
+
+		$targetAmt = abs((float)$stmt['amount']);
+		$targetDate = strtotime($stmt['txn_date']);
+		$ref = strtolower(trim((string)($stmt['reference'] ?? '')));
+		$desc = strtolower(trim((string)($stmt['description'] ?? '')));
+
+		$suggestions = array();
+		foreach($bookLines as $b){
+			$bookAmt = abs((float)$b['book_net']);
+			if($bookAmt == 0) continue;
+			if(abs($bookAmt - $targetAmt) > 0.009) continue;
+			$bd = strtotime($b['jev_date']);
+			$dayDiff = abs(($bd - $targetDate) / 86400);
+			if($dayDiff > 7) continue;
+			$score = 10 - $dayDiff;
+			$refHit = 0;
+			if($ref !== '' && strpos(strtolower($b['ref']), $ref) !== false) $refHit = 5;
+			if($desc !== '' && strpos(strtolower($b['ref']), $desc) !== false) $refHit = max($refHit, 2);
+			$score += $refHit;
+			$suggestions[] = array(
+				'jevdata_id' => $b['jevdata_id'],
+				'jev_date' => $b['jev_date'],
+				'jev_no' => $b['jev_no'],
+				'ref' => $b['ref'],
+				'book_net' => $b['book_net'],
+				'matched_amount' => $targetAmt,
+				'score' => $score
+			);
+		}
+		usort($suggestions, function($a,$b){ return $b['score'] <=> $a['score']; });
+		$suggestions = array_slice($suggestions, 0, 10);
+		return $this->respondJson(array('success'=>true,'suggestions'=>$suggestions));
+	}
+
+	public function api_bank_recon_match_add(){
+		$reconId = (int)$this->input->post('recon_id');
+		$stmt = (int)$this->input->post('statement_line_id');
+		$jevdataId = (int)$this->input->post('jevdata_id');
+		$amt = $this->parseMoney($this->input->post('matched_amount'));
+		$this->db->insert('tbl_bank_recon_matches', array(
+			'recon_id'=>$reconId,
+			'statement_line_id'=>$stmt,
+			'jevdata_id'=>$jevdataId,
+			'matched_amount'=>$amt
+		));
+		return $this->respondJson(array('success'=>true));
+	}
+
+	public function api_bank_recon_match_delete(){
+		$id = (int)$this->input->post('match_id');
+		$this->db->where('match_id', $id)->delete('tbl_bank_recon_matches');
+		return $this->respondJson(array('success'=>true));
+	}
+
+	// ----------------------------
+	// BRS generation (xlsx + preview)
+	// ----------------------------
+
+	private function buildBRSWorkbook($reconId){
+		$brgyId = $this->getSelectedBrgyId();
+		$recon = $this->db->where('recon_id', (int)$reconId)->get('tbl_bank_recon')->row_array();
+		if(!$recon){
+			return array(null, 'Recon not found.');
+		}
+		$bank = $this->getBankAccount($recon['bank_account_id'], $brgyId);
+		if(!$bank){
+			return array(null, 'Bank account not found.');
+		}
+		list($ps, $pe) = $this->buildPeriodDates($recon['period_year'], $recon['period_month']);
+
+		$stmtEnding = (float)$recon['statement_ending_balance'];
+		$bookEnding = (float)$recon['book_ending_balance'];
+
+		$this->db->where('recon_id', (int)$reconId);
+		$stmtLines = $this->db->get('tbl_bank_statement_lines')->result_array();
+		$this->db->where('recon_id', (int)$reconId);
+		$items = $this->db->get('tbl_bank_recon_items')->result_array();
+
+		$typeSum = $this->brsSumItemsByType($items);
+		$depositsInTransit = (float)($typeSum['deposit_in_transit'] ?? 0);
+		$outstandingChecks = (float)($typeSum['outstanding_check'] ?? 0);
+		$bankErrors = (float)($typeSum['bank_error'] ?? 0);
+		$bookErrors = (float)($typeSum['book_error'] ?? 0);
+		$bankCharges = (float)($typeSum['bank_charge'] ?? 0);
+		$bankDebitMemos = (float)($typeSum['bank_debit_memo'] ?? 0);
+		$interest = (float)($typeSum['interest_income'] ?? 0);
+		$bankCreditMemos = (float)($typeSum['bank_credit_memo'] ?? 0);
+		$other = (float)($typeSum['other'] ?? 0);
+
+		$adjustedBank = $stmtEnding + $depositsInTransit - $outstandingChecks + $bankErrors;
+		$adjustedBook = $bookEnding - $bankCharges - $bankDebitMemos + $interest + $bankCreditMemos + $bookErrors + $other;
+		$diff = $adjustedBank - $adjustedBook;
+
+		$form = $this->loadBrsFormConfig();
+		$itemLabels = (isset($form['item_row_labels']) && is_array($form['item_row_labels'])) ? $form['item_row_labels'] : array();
+
+		$asOf = !empty($recon['statement_as_of_date']) ? $recon['statement_as_of_date'] : $pe;
+		$explanatory = isset($recon['explanatory_comment']) ? trim((string)$recon['explanatory_comment']) : '';
+		$branch = isset($bank['branch']) ? trim((string)$bank['branch']) : '';
+
+		$spreadsheet = new Spreadsheet();
+		$sheet = $spreadsheet->getActiveSheet();
+		$sheet->setTitle('BRS Summary');
+
+		$r = 1;
+		$sheet->setCellValue('A'.$r, isset($form['title']) ? $form['title'] : 'BANK RECONCILIATION STATEMENT (BRS)');
+		$r += 2;
+		$sheet->setCellValue('A'.$r, 'Date (as of): '.date('F d, Y', strtotime($asOf)));
+		$r++;
+		$sheet->setCellValue('A'.$r, 'Barangay: '.$_SESSION['currbrgy']);
+		$r++;
+		$sheet->setCellValue('A'.$r, 'Tel. No.: '.(isset($form['barangay_tel']) ? $form['barangay_tel'] : ''));
+		$r++;
+		$sheet->setCellValue('A'.$r, 'Bank Name: '.$bank['bank_name']);
+		$r++;
+		$sheet->setCellValue('A'.$r, 'Branch: '.$branch);
+		$r++;
+		$sheet->setCellValue('A'.$r, 'City/Municipality: '.(isset($form['city_municipality']) ? $form['city_municipality'] : ''));
+		$r++;
+		$sheet->setCellValue('A'.$r, 'Province: '.(isset($form['province']) ? $form['province'] : ''));
+		$r++;
+		$sheet->setCellValue('A'.$r, 'Current Account No.: '.$bank['account_no']);
+		$r++;
+		if(!empty($form['account_kind_label'])){
+			$sheet->setCellValue('A'.$r, 'Account type: '.$form['account_kind_label']);
+			$r++;
+		}
+		$sheet->setCellValue('A'.$r, 'Account name (in bank records): '.$bank['account_name']);
+		$r++;
+		$sheet->setCellValue('A'.$r, 'Accounting period (book): '.date('F Y', strtotime($ps)));
+		$r += 2;
+
+		$tableHeaderRow = $r;
+		$sheet->setCellValue('A'.$r, 'Particulars');
+		$sheet->setCellValue('B'.$r, 'Book');
+		$sheet->setCellValue('C'.$r, 'Bank');
+		$sheet->getStyle('A'.$r.':C'.$r)->getFont()->setBold(true);
+		$r++;
+
+		$sheet->setCellValue('A'.$r, isset($form['row_unadjusted_book']) ? $form['row_unadjusted_book'] : 'Unadjusted balance per books');
+		$sheet->setCellValue('B'.$r, $bookEnding);
+		$r++;
+
+		if($bankCharges > 0){
+			$sheet->setCellValue('A'.$r, isset($form['row_less_bank_charges']) ? $form['row_less_bank_charges'] : 'Less: Bank charges');
+			$sheet->setCellValue('B'.$r, -$bankCharges);
+			$r++;
+		}
+		if($bankDebitMemos > 0){
+			$sheet->setCellValue('A'.$r, isset($form['row_less_bank_debit_memo']) ? $form['row_less_bank_debit_memo'] : 'Less: Bank debit memos');
+			$sheet->setCellValue('B'.$r, -$bankDebitMemos);
+			$r++;
+		}
+		if($interest > 0){
+			$sheet->setCellValue('A'.$r, isset($form['row_add_interest']) ? $form['row_add_interest'] : 'Add: Interest income');
+			$sheet->setCellValue('B'.$r, $interest);
+			$r++;
+		}
+		if($bankCreditMemos > 0){
+			$sheet->setCellValue('A'.$r, isset($form['row_add_bank_credit_memo']) ? $form['row_add_bank_credit_memo'] : 'Add: Bank credit memos');
+			$sheet->setCellValue('B'.$r, $bankCreditMemos);
+			$r++;
+		}
+		$bookErrOther = $bookErrors + $other;
+		if(abs($bookErrOther) > 0.00001){
+			$sheet->setCellValue('A'.$r, isset($form['row_book_errors_other']) ? $form['row_book_errors_other'] : 'Add/Less: Book errors and other');
+			$sheet->setCellValue('B'.$r, $bookErrOther);
+			$r++;
+		}
+
+		$sheet->setCellValue('A'.$r, isset($form['row_adj_book']) ? $form['row_adj_book'] : 'Adjusted balance per books');
+		$sheet->setCellValue('B'.$r, $adjustedBook);
+		$sheet->getStyle('A'.$r.':B'.$r)->getFont()->setBold(true);
+		$r += 2;
+
+		$sheet->setCellValue('A'.$r, isset($form['row_unadjusted_bank']) ? $form['row_unadjusted_bank'] : 'Unadjusted balance per bank statement');
+		$sheet->setCellValue('C'.$r, $stmtEnding);
+		$r++;
+
+		if($depositsInTransit > 0){
+			$sheet->setCellValue('A'.$r, isset($form['row_add_deposits_transit']) ? $form['row_add_deposits_transit'] : 'Add: Deposits in transit');
+			$sheet->setCellValue('C'.$r, $depositsInTransit);
+			$r++;
+		}
+		if($outstandingChecks > 0){
+			$sheet->setCellValue('A'.$r, isset($form['row_less_outstanding_checks']) ? $form['row_less_outstanding_checks'] : 'Less: Outstanding checks');
+			$sheet->setCellValue('C'.$r, -$outstandingChecks);
+			$r++;
+		}
+		if(abs($bankErrors) > 0.00001){
+			$sheet->setCellValue('A'.$r, isset($form['row_bank_errors']) ? $form['row_bank_errors'] : 'Add/Less: Bank errors');
+			$sheet->setCellValue('C'.$r, $bankErrors);
+			$r++;
+		}
+
+		$sheet->setCellValue('A'.$r, isset($form['row_adj_bank']) ? $form['row_adj_bank'] : 'Adjusted balance per bank statement');
+		$sheet->setCellValue('C'.$r, $adjustedBank);
+		$sheet->getStyle('A'.$r.':C'.$r)->getFont()->setBold(true);
+		$r += 2;
+
+		$sheet->setCellValue('A'.$r, isset($form['row_difference']) ? $form['row_difference'] : 'Difference (should be zero)');
+		$sheet->setCellValue('B'.$r, $diff);
+		$lastNumericRow = $r;
+		$r += 2;
+
+		$sheet->getStyle('B'.($tableHeaderRow + 1).':C'.$lastNumericRow)->getNumberFormat()->setFormatCode('#,##0.00');
+
+		$sheet->setCellValue('A'.$r, 'Explanatory comment:');
+		$r++;
+		$sheet->setCellValue('A'.$r, $explanatory !== '' ? $explanatory : '—');
+		$sheet->getStyle('A'.$r)->getAlignment()->setWrapText(true);
+		$sheet->mergeCells('A'.$r.':C'.$r);
+		$r += 2;
+
+		$sheet->setCellValue('A'.$r, 'Certified correct:');
+		$r++;
+		$certName = isset($form['certified_by_name']) ? $form['certified_by_name'] : '';
+		$certTitle = isset($form['certified_by_title']) ? $form['certified_by_title'] : '';
+		$certLine = ($certName !== '' && $certTitle !== '') ? ($certName.', '.$certTitle) : ($certName !== '' ? $certName : $certTitle);
+		$sheet->setCellValue('A'.$r, $certLine !== '' ? $certLine : '___________________________');
+		$r += 2;
+
+		if(!empty($form['instructions_short'])){
+			$sheet->setCellValue('A'.$r, 'Notes (submission / distribution):');
+			$r++;
+			$sheet->setCellValue('A'.$r, $form['instructions_short']);
+			$sheet->getStyle('A'.$r)->getAlignment()->setWrapText(true);
+			$sheet->mergeCells('A'.$r.':C'.$r);
+			$r++;
+		}
+
+		$sheet->getColumnDimension('A')->setWidth(52);
+		$sheet->getColumnDimension('B')->setWidth(16);
+		$sheet->getColumnDimension('C')->setWidth(16);
+
+		// Details sheet
+		$detail = $spreadsheet->createSheet();
+		$detail->setTitle('Details');
+		$detail->setCellValue('A1', 'Statement Lines');
+		$detail->fromArray(array(array('Date', 'Description', 'Ref', 'Amount')), null, 'A2');
+		$rr = 3;
+		foreach($stmtLines as $sl){
+			$detail->fromArray(array(array($sl['txn_date'], $sl['description'], $sl['reference'], (float)$sl['amount'])), null, 'A'.$rr);
+			$rr++;
+		}
+		$rr += 2;
+		$detail->setCellValue('A'.$rr, 'Reconciling Items (detail)');
+		$rr++;
+		$detail->fromArray(array(array('Type', 'Reference', 'Notes', 'Amount')), null, 'A'.$rr);
+		$rr++;
+		foreach($items as $it){
+			$lbl = isset($itemLabels[$it['item_type']]) ? $itemLabels[$it['item_type']] : $it['item_type'];
+			$detail->fromArray(array(array($lbl.' ('.$it['item_type'].')', $it['reference'], $it['notes'], (float)$it['amount'])), null, 'A'.$rr);
+			$rr++;
+		}
+
+		return array($spreadsheet, null);
+	}
+
+	public function generateBRS(){
+		$reconId = (int)$this->input->get('recon_id');
+		list($spreadsheet, $err) = $this->buildBRSWorkbook($reconId);
+		if(!$spreadsheet){
+			return $this->respondNoData($err, '/bank_recon');
+		}
+		$this->load->helper('download');
+		$this->load->helper('file');
+		$currentDateTime = date('F-Y');
+		$excelFileName = 'Bank_Reconciliation_' .ucfirst($_SESSION['currbrgy']).'-'.$currentDateTime . '.xlsx';
+		$excelFilePath = FCPATH . 'temp/' . $excelFileName;
+		$writer = new Xlsx($spreadsheet);
+		$writer->save($excelFilePath);
+		return $this->respondWithSpreadsheetFile($excelFileName, $excelFilePath);
+	}
+
+	public function previewBRS(){
+		$this->enablePreviewMode();
+		return $this->generateBRS();
 	}
 
 
@@ -3905,17 +4784,23 @@ public function generateRRR(){
 
 
 public function generateAG(){
-	
-	// Convert the date strings to 'YYYY-MM-DD' format
-	$startDate = date('Y-m-d', strtotime($this->input->post('sdate')));
-	$endDate = date('Y-m-d', strtotime($this->input->post('edate')));
-	
-	//$this->getrrr_data($startDate,$endDate);
-	
-	$this->generateag_file($startDate,$endDate);
-	
-	
-
+	$sRaw = trim((string)$this->input->post('sdate'));
+	$eRaw = trim((string)$this->input->post('edate'));
+	if($sRaw === '' || $eRaw === ''){
+		$this->session->set_flashdata('error', 'Please select a date range (choose Type e.g. Monthly, or Custom dates).');
+		redirect('aging_page');
+		return;
+	}
+	$tsStart = strtotime($sRaw);
+	$tsEnd = strtotime($eRaw);
+	if($tsStart === false || $tsEnd === false){
+		$this->session->set_flashdata('error', 'Invalid start or end date.');
+		redirect('aging_page');
+		return;
+	}
+	$startDate = date('Y-m-d', $tsStart);
+	$endDate = date('Y-m-d', $tsEnd);
+	$this->generateag_file($startDate, $endDate);
 }
 
 
@@ -3923,20 +4808,27 @@ public function generateag_file($startDate,$endDate){
 	$this->load->helper('download');
 	$this->load->helper('file');
 	
-	//get data
-	$result =$this->getaging_data("10305010","10305040",$startDate,$endDate);
-	
-	// $this->output
-	// ->set_content_type('application/json')
-	// ->set_output(json_encode($result));
+	$this->config->load('aging_report', true);
+	$ar = $this->config->item('aging_report');
+	$acStart = (is_array($ar) && !empty($ar['acc_code_start'])) ? trim((string)$ar['acc_code_start']) : '10305010';
+	$acEnd = (is_array($ar) && !empty($ar['acc_code_end'])) ? trim((string)$ar['acc_code_end']) : '10305040';
 
+	$result = $this->getaging_data($acStart, $acEnd, $startDate, $endDate);
 
-	// Load PhpSpreadsheet library
-	
-
-	// Load the existing template
-	$templatePath = FCPATH .'assets/templates/aging.xlsx';
-	$spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($templatePath);
+	$templatePath = FCPATH.'assets/templates/aging.xlsx';
+	if(is_file($templatePath)){
+		$spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($templatePath);
+	}else{
+		$spreadsheet = new Spreadsheet();
+		$sheetStub = $spreadsheet->getActiveSheet();
+		$sheetStub->setTitle('Aging');
+		$sheetStub->setCellValue('A1', 'AGING SCHEDULE OF UNLIQUIDATED CASH ADVANCES');
+		$sheetStub->mergeCells('A1:L1');
+		$sheetStub->fromArray(array(array(
+			'Account Title','Payee','Particulars','Check No.','Check Date','Amount',
+			'0-30 days','31-90 days','91-365 days','2nd year','3rd year','Beyond 3 years'
+		)), null, 'A12');
+	}
 
 	// Assuming $result contains your trial balance result (array or object)
 	// Replace this with your method to get the trial balance result
@@ -3955,18 +4847,19 @@ public function generateag_file($startDate,$endDate){
 	$row = 13;
 
 	foreach($result as $item){
-		$aging_category='';
-		$check_date = strtotime($item->check_date);
+		$dateForAging = !empty($item->check_date) ? $item->check_date : (isset($item->jev_date) ? $item->jev_date : null);
+		$checkTs = $dateForAging ? strtotime($dateForAging) : false;
+		if($checkTs === false){
+			$checkTs = strtotime($endDate);
+		}
 		$current_date = time();
-		$difference = $current_date - $check_date;
-		$days_difference = floor($difference / (60 * 60 * 24));
-
-    	$days_difference = floor($difference / (60 * 60 * 24));
+		$difference = $current_date - $checkTs;
+		$days_difference = (int)floor($difference / (60 * 60 * 24));
 		$sheet->setCellValue('A'.$row,$item->acc_title);
 		$sheet->setCellValue('B'.$row,$item->payee);
 		$sheet->setCellValue('C'.$row,$item->particulars);
 		$sheet->setCellValue('D'.$row,$item->check_no);
-		$sheet->setCellValue('E'.$row,date('Y-m-d',strtotime($item->check_date)));
+		$sheet->setCellValue('E'.$row,$dateForAging ? date('Y-m-d', strtotime($dateForAging)) : '');
 		$sheet->setCellValue('F'.$row,$item->debit);
 
 		// Categorize the aging
@@ -4019,38 +4912,42 @@ public function generateag_file($startDate,$endDate){
 //aging
 
 public function getaging_data($ac_start,$ac_end,$startDate,$endDate){
+	/*
+	 * As-of aging: include all cash-advance lines booked through the report END date for this barangay.
+	 * Do NOT use jev_date BETWEEN start and end only — that hides older unliquidated advances when the
+	 * user picks a short period (e.g. one month) with no new DV activity.
+	 */
+	$brgyId = isset($_SESSION['currbrgyid']) ? (int)$_SESSION['currbrgyid'] : 0;
 	$sql = "SELECT
 	jd.debit,
+	jd.credit,
 	jd.check_no,
 	jd.check_date,
 	jd.payee,
 	jd.payor,
 	jd.acc_title,
-	j.particulars
+	jd.acc_code,
+	j.particulars,
+	j.jev_date
 FROM
 	tbl_jevdata jd
-LEFT JOIN
+INNER JOIN
 	tbl_jev j ON jd.jev_no = j.jev_no AND jd.jev_id = j.jev_id
 WHERE
-	(j.jev_date BETWEEN ? AND ? OR j.jev_date IS NULL)
-	AND j.brgy = ?
-	AND jd.acc_code BETWEEN ? AND ?";
-	
-$queryParams = [$startDate, $endDate,$_SESSION['currbrgyid'],$ac_start,$ac_end];
-$query = $this->db->query($sql, $queryParams);
-if($query->num_rows() == 1){
-	return  $query->result();
-	// $this->output
-	// ->set_content_type('application/json')
-	// ->set_output(json_encode($query->result()));
-	
+	j.brgy = ?
+	AND j.jev_date IS NOT NULL
+	AND j.jev_date <= ?
+	AND TRIM(jd.acc_code) >= ?
+	AND TRIM(jd.acc_code) <= ?";
 
-
-}else{
-	$this->session->set_flashdata('error', 'No Data Available for the specific Data range!');
-		redirect('/aging_page');
-}
-
+	$queryParams = array($brgyId, $endDate, trim((string)$ac_start), trim((string)$ac_end));
+	$query = $this->db->query($sql, $queryParams);
+	if($query->num_rows() > 0){
+		return $query->result();
+	}
+	$this->session->set_flashdata('error', 'No Data Available for the selected cut-off. '
+		.'Confirm barangay, JEV lines use account codes between '.$ac_start.' and '.$ac_end.', and JEV date is on or before '.$endDate.'.');
+	redirect('/aging_page');
 }
 
 

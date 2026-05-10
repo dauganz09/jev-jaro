@@ -39,7 +39,8 @@
 	$this->uri->segment(1) == 'tb_page' ||
 	$this->uri->segment(1) == 'fs_page' ||
 	$this->uri->segment(1) == 'journals' ||
-	$this->uri->segment(1) == 'gl'
+	$this->uri->segment(1) == 'gl' ||
+	$this->uri->segment(1) == 'bank_recon'
 ): ?>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/handsontable@14.5.0/dist/handsontable.full.min.css">
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -63,6 +64,14 @@
 
 <?php if($this->uri->segment(1) == 'journals'):?>
     <script src="<?php echo base_url('assets'); ?>/js/journals.js"></script>
+<?php endif;?>
+
+<?php if($this->uri->segment(1) == 'bank_accounts' || $this->uri->segment(1) == 'bank_recon'):?>
+    <script src="<?php echo base_url('assets'); ?>/js/bank-recon.js"></script>
+<?php endif;?>
+
+<?php if($this->uri->segment(1) == 'chart_of_accounts'):?>
+    <script src="<?php echo base_url('assets'); ?>/js/coa-accounts.js"></script>
 <?php endif;?>
 
 

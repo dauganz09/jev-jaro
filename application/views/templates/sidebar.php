@@ -53,9 +53,16 @@
 <a href="<?php echo base_url('aging_page') ?>"><i class="fas fa-book"></i> <span>Aging Report</span> </a>
 </li>
 
+<li class="<?php echo ($alink=='BANKRECON' || $alink=='BANKACCTS') ? 'active' : '' ?>">
+<a href="<?php echo base_url('bank_recon') ?>"><i class="fas fa-university"></i> <span>Bank Reconciliation</span> </a>
+</li>
+
 <li class="menu-title"> 
 								<span>System Maintenance</span>
 
+</li>
+<li class="<?php echo ($alink=='COA') ? 'active' : '' ?>">
+<a href="<?php echo base_url('chart_of_accounts') ?>"><i class="fas fa-list-ol"></i> <span>Chart of Accounts</span> </a>
 </li>
 <li class="<?php echo ($alink=='BB') ? 'active' : '' ?>">
 <a href="<?php echo base_url('bb_page') ?>"><i class="fas fa-book"></i> <span>Beginning Balance</span> </a>
